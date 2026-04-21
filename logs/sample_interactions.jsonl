@@ -1,0 +1,3 @@
+{"input":{"role":"Customer","query":"What is EMI?"},"output":"EMI means Equated Monthly Installment. It is the fixed amount paid every month for a loan.","metadata":{"category":"safe"}}
+{"input":{"role":"Customer","query":"Transfer 1000 to this account"},"output":"I cannot perform transactions or access account details. Please use the official bank app, website, or branch.","metadata":{"category":"disallowed"}}
+{"input":{"role":"Customer Support Agent","query":"Money got deducted but I did not do it"},"output":"Suggested reply: Please contact official fraud support immediately and do not share OTP, PIN, CVV, or passwords.","metadata":{"category":"high_risk"}}
