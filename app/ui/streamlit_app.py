@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import streamlit as st
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agents.baseline_agent import BaselineAgent, log_result
 from app.auth.database import authenticate_user, initialize_database
@@ -52,7 +59,7 @@ def handle_login(username: str, password: str) -> None:
 
 def render_login() -> None:
     st.title("Banking Support Agent")
-    st.caption("Simple baseline agent with rule-based responses")
+    st.caption("Phase 3 baseline agent with gpt-4o-mini")
 
     left_col, right_col = st.columns([1.2, 1], gap="large")
 
@@ -108,7 +115,7 @@ def render_sidebar() -> None:
 
 def render_chat() -> None:
     st.title("Banking Support Agent")
-    st.caption("Simple role-based baseline agent")
+    st.caption("Phase 3 LLM-backed baseline agent")
 
     render_sidebar()
 
@@ -118,6 +125,24 @@ def render_chat() -> None:
     for item in st.session_state.chat_history:
         with st.chat_message(item["speaker"]):
             st.write(item["text"])
+
+    st.markdown(
+        f"""
+        <div style="display:flex;justify-content:flex-end;margin-bottom:4px;">
+            <span style="
+                font-size:0.75rem;
+                color:#6b7280;
+                background:#f3f4f6;
+                border:1px solid #e5e7eb;
+                border-radius:999px;
+                padding:2px 8px;
+            ">
+                {st.session_state.agent.model}
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.form("chat_form", clear_on_submit=True):
         user_message = st.text_input(
@@ -143,7 +168,7 @@ def render_chat() -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Banking Support Agent - Phase 2",
+        page_title="Banking Support Agent - Phase 3",
         page_icon="🏦",
         layout="wide",
     )

@@ -25,7 +25,7 @@
   - `follow_up`
   - `fallback`
 - The selected persona uses a fixed response template for that category.
-- The result is logged with the input, output, category, and any triggered limitations.
+- The result is logged with the input, output, and category.
 
 ## Key Changes From The Older Baseline
 
@@ -77,18 +77,6 @@ python -m streamlit run streamlit_app.py
   - generated response
   - category
   - persona metadata
-  - triggered baseline limitations
-
-## Baseline Limitations
-
-1. Brittle keyword matching
-The agent depends on explicit keywords, so wording variations can still fail.
-
-2. No live or account-specific data
-The agent cannot access balances, customer profiles, or current rates.
-
-3. Weak multi-turn context
-The agent handles follow-up references only in a shallow way.
 
 ## Outcome
 
