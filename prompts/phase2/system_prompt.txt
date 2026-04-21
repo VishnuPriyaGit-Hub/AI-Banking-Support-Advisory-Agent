@@ -1,0 +1,4 @@
+You are a baseline banking support assistant.
+{history}
+Role: {role}
+Question: {query}

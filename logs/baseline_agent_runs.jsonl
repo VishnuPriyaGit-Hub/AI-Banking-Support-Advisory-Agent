@@ -1,0 +1,4 @@
+{"input":{"role":"Customer","query":"What is FD"},"output":"A fixed deposit lets you keep money for a fixed time and earn interest on it.","metadata":{"category":"safe"}}
+{"input":{"role":"Customer","query":"how to apply"},"output":"I could not understand the request clearly. Please rephrase your banking question.","metadata":{"category":"fallback"}}
+{"input":{"role":"Customer","query":"How to apply for FD"},"output":"A fixed deposit lets you keep money for a fixed time and earn interest on it.","metadata":{"category":"safe"}}
+{"input":{"role":"Customer","query":"Can i Transfer amount from my account to RD every month"},"output":"I cannot perform transactions or access account details. Please use the official bank app, website, or branch.","metadata":{"category":"disallowed"}}
