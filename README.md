@@ -207,3 +207,64 @@ Structured response containing:
 ## Final Insight
 
 This system is not just a chatbot. It is a policy-aware banking support assistant that classifies intent, respects safety boundaries, and uses an LLM to generate non-transactional guidance.
+
+## Phase 4 RAG Loading
+
+This project now includes a simple ingestion script that:
+
+- reads selected documents from `Docs/`
+- chunks the text
+- creates embeddings
+- loads the vectors into Zilliz Cloud / Milvus
+
+Only these files are considered:
+
+- `Accounts.docx`
+- `Bank FAQ's.docx`
+- `Deposits.docx`
+- `Loan.docx`
+
+### Required `.env` values
+
+Add these values before running the loader:
+
+```env
+EMBEDDING_BASE_URL=https://api.openai.com/v1
+EMBEDDING_API_KEY=your_embedding_api_key
+EMBEDDING_MODEL=text-embedding-3-small
+
+ZILLIZ_ENDPOINT=your_zilliz_public_endpoint
+ZILLIZ_API_KEY=your_zilliz_api_key
+ZILLIZ_CLUSTER_ID=your_zilliz_cluster_id
+ZILLIZ_COLLECTION_NAME=banking_rag_chunks
+```
+
+Notes:
+
+- `EMBEDDING_BASE_URL` and `EMBEDDING_API_KEY` can point to any OpenAI-compatible embeddings endpoint.
+- `ZILLIZ_CLUSTER_ID` is stored in the ingest summary for reference. The actual Milvus connection uses `ZILLIZ_ENDPOINT` and `ZILLIZ_API_KEY`.
+
+### Install dependencies
+
+```powershell
+pip install pymilvus
+```
+
+### Run the loader
+
+```powershell
+python -m app.scripts.load_rag_to_milvus --drop-existing
+```
+
+Optional flags:
+
+- `--chunk-size 800`
+- `--chunk-overlap 120`
+- `--batch-size 16`
+
+### Output
+
+After loading:
+
+- vectors are inserted into the configured Zilliz / Milvus collection
+- a small summary file is written to `data/rag_ingest_summary.json`

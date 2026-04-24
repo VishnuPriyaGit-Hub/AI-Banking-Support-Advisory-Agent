@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import streamlit as st
 
-from app.agents.baseline_agent import BaselineAgent, log_result
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.agents.rag_agent import RAGAgent, log_result
 from app.auth.database import authenticate_user, initialize_database
 from app.core.config import AUTH_DB_PATH, DEFAULT_LOG_PATH
 from app.models.agent import UserInput
@@ -14,7 +21,7 @@ def init_session_state() -> None:
         "user_name": "",
         "role": "",
         "user_profile": {},
-        "agent": BaselineAgent(),
+        "agent": RAGAgent(),
         "chat_history": [],
         "latest_error": "",
     }
@@ -52,7 +59,7 @@ def handle_login(username: str, password: str) -> None:
 
 def render_login() -> None:
     st.title("Banking Support Agent")
-    st.caption("Simple baseline agent with rule-based responses")
+    st.caption("RAG retrieval agent with source-aware answers")
 
     left_col, right_col = st.columns([1.2, 1], gap="large")
 
@@ -108,7 +115,7 @@ def render_sidebar() -> None:
 
 def render_chat() -> None:
     st.title("Banking Support Agent")
-    st.caption("Simple role-based baseline agent")
+    st.caption("RAG retrieval agent")
 
     render_sidebar()
 
@@ -118,6 +125,10 @@ def render_chat() -> None:
     for item in st.session_state.chat_history:
         with st.chat_message(item["speaker"]):
             st.write(item["text"])
+            if item["speaker"] == "assistant" and item.get("sources"):
+                st.caption(f"Sources: {item['sources']}")
+            if item["speaker"] == "assistant" and item.get("confidence_score"):
+                st.caption(f"Confidence Score: {item['confidence_score']}")
 
     with st.form("chat_form", clear_on_submit=True):
         user_message = st.text_input(
@@ -129,11 +140,22 @@ def render_chat() -> None:
     if submitted and user_message.strip():
         try:
             request = UserInput(role=st.session_state.role, query=user_message)
-            result = st.session_state.agent.run(request)
+            prior_history = [
+                {"speaker": history_item["speaker"], "text": history_item["text"]}
+                for history_item in st.session_state.chat_history
+            ]
+            result = st.session_state.agent.run(request, chat_history=prior_history)
             log_result(DEFAULT_LOG_PATH, result)
 
             st.session_state.chat_history.append({"speaker": "user", "text": user_message})
-            st.session_state.chat_history.append({"speaker": "assistant", "text": result.output})
+            st.session_state.chat_history.append(
+                {
+                    "speaker": "assistant",
+                    "text": result.output,
+                    "sources": result.metadata.get("sources", ""),
+                    "confidence_score": result.metadata.get("confidence_score", ""),
+                }
+            )
             st.session_state.latest_error = ""
             st.rerun()
         except Exception as exc:
@@ -143,7 +165,7 @@ def render_chat() -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Banking Support Agent - Phase 2",
+        page_title="Banking Support Agent - RAG",
         page_icon="🏦",
         layout="wide",
     )

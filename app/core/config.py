@@ -7,6 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 APP_DIR = PROJECT_ROOT / "app"
 DATA_DIR = PROJECT_ROOT / "data"
+DOCS_DIR = PROJECT_ROOT / "Docs"
 LOG_DIR = PROJECT_ROOT / "logs"
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
@@ -14,7 +15,10 @@ ENV_FILE_PATH = PROJECT_ROOT / ".env"
 DEFAULT_LOG_PATH = LOG_DIR / "baseline_agent_runs.jsonl"
 DEMO_LOG_PATH = LOG_DIR / "sample_interactions.jsonl"
 PHASE2_PROMPT_PATH = PROMPTS_DIR / "phase2" / "system_prompt.txt"
+PHASE3_PROMPT_PATH = PROMPTS_DIR / "phase3" / "system_prompt.txt"
+PHASE4_PROMPT_PATH = PROMPTS_DIR / "phase4" / "system_prompt.txt"
 AUTH_DB_PATH = DATA_DIR / "banking_auth.db"
+RAG_SUMMARY_PATH = DATA_DIR / "rag_ingest_summary.json"
 
 ALLOWED_ROLES = {
     "customer": "Customer",

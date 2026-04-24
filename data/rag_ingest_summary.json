@@ -1,0 +1,24 @@
+{
+  "docs_dir": "C:\\Users\\user\\OneDrive\\Desktop\\Agentic AI\\Capstone Project\\Docs",
+  "selected_files": [
+    "Accounts.docx",
+    "Bank FAQ's.docx",
+    "Cards.docx",
+    "Deposits.docx",
+    "Loan.docx"
+  ],
+  "chunk_count": 62,
+  "doc_groups": [
+    "accounts",
+    "cards",
+    "deposits",
+    "faq",
+    "loans"
+  ],
+  "embedding_model": "text-embedding-3-small",
+  "embedding_dimension": 1536,
+  "collection_name": "banking_rag_chunks",
+  "zilliz_endpoint": "https://in03-5ecec73c147f2d6.serverless.aws-eu-central-1.cloud.zilliz.com",
+  "zilliz_cluster_id": "in03-5ecec73c147f2d6",
+  "inserted_rows": 62
+}
