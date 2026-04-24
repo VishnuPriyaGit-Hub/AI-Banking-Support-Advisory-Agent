@@ -1,1 +1,9 @@
 .env
+*.env
+__pycache__/
+*.pyc
+.streamlit/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
