@@ -9,10 +9,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.agents.rag_agent import RAGAgent, log_result
-from app.auth.database import authenticate_user, initialize_database
+from app.agents.langgraph_agent import LangGraphBaselineAgent
+from app.agents.rag_agent import log_result
+from app.auth.supabase_auth import SupabaseAuthClient
 from app.core.config import AUTH_DB_PATH, DEFAULT_LOG_PATH
-from app.models.agent import UserInput
 
 
 def init_session_state() -> None:
@@ -21,14 +21,13 @@ def init_session_state() -> None:
         "user_name": "",
         "role": "",
         "user_profile": {},
-        "agent": RAGAgent(),
+        "agent": LangGraphBaselineAgent(),
         "chat_history": [],
         "latest_error": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-    initialize_database(seed=True)
 
 
 def reset_session() -> None:
@@ -40,16 +39,18 @@ def reset_session() -> None:
     st.session_state.latest_error = ""
 
 
-def handle_login(username: str, password: str) -> None:
-    if not username.strip():
-        st.error("Enter a username.")
+def handle_login(email: str, password: str) -> None:
+    if not email.strip():
+        st.error("Enter an email.")
         return
-    user_profile = authenticate_user(username=username.strip(), password=password)
-    if user_profile is None:
-        st.error("Invalid username or password.")
+    auth_client = SupabaseAuthClient()
+    try:
+        user_profile = auth_client.sign_in(email=email.strip(), password=password)
+    except Exception as exc:
+        st.error(f"Login failed: {exc}")
         return
     st.session_state.authenticated = True
-    st.session_state.user_name = user_profile["full_name"]
+    st.session_state.user_name = user_profile.get("customer_name") or user_profile.get("email", "")
     st.session_state.role = user_profile["role"]
     st.session_state.user_profile = user_profile
     st.session_state.chat_history = []
@@ -59,29 +60,23 @@ def handle_login(username: str, password: str) -> None:
 
 def render_login() -> None:
     st.title("Banking Support Agent")
-    st.caption("RAG retrieval agent with source-aware answers")
+    st.caption("Phase 5 LangGraph agent with tools")
 
     left_col, right_col = st.columns([1.2, 1], gap="large")
 
     with left_col:
         st.subheader("Login")
         with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("Username", placeholder="e.g. customer.asha")
+            username = st.text_input("Email", placeholder="e.g. customer@example.com")
             password = st.text_input("Password", type="password", placeholder="password")
             submitted = st.form_submit_button("Login", use_container_width=True)
         if submitted:
             handle_login(username, password)
 
     with right_col:
-        st.subheader("Demo Accounts")
-        st.info(
-            "**Customers:** `customer.asha / customer123` and `customer.rahul / customer456`\n\n"
-            "**Support:** `support.kiran / support123`\n\n"
-            "**Branch Manager:** `branch.raj / branch123`\n\n"
-            "**Risk:** `risk.neha / risk123`\n\n"
-            "**Admin:** `admin.anita / admin123`"
-        )
-        st.caption(f"SQLite DB: `{AUTH_DB_PATH.name}`")
+        st.subheader("Supabase Auth")
+        st.info("Use your Supabase email and password.")
+        st.caption("Authenticated access controls are enforced through Supabase + RLS.")
 
 
 def render_sidebar() -> None:
@@ -91,10 +86,10 @@ def render_sidebar() -> None:
         st.write(f"**Role:** {st.session_state.role}")
 
         profile = st.session_state.user_profile
-        if profile.get("support_agent_name"):
-            st.write(f"Support Agent: {profile['support_agent_name']}")
-        if profile.get("branch_manager_name"):
-            st.write(f"Branch Manager: {profile['branch_manager_name']}")
+        if profile.get("branch"):
+            st.write(f"Branch: {profile['branch']}")
+        if profile.get("customer_id"):
+            st.write(f"Customer ID: {profile['customer_id']}")
 
         st.divider()
         st.subheader("Try These Queries")
@@ -115,7 +110,7 @@ def render_sidebar() -> None:
 
 def render_chat() -> None:
     st.title("Banking Support Agent")
-    st.caption("RAG retrieval agent")
+    st.caption("Phase 5 LangGraph agent")
 
     render_sidebar()
 
@@ -129,6 +124,8 @@ def render_chat() -> None:
                 st.caption(f"Sources: {item['sources']}")
             if item["speaker"] == "assistant" and item.get("confidence_score"):
                 st.caption(f"Confidence Score: {item['confidence_score']}")
+            if item["speaker"] == "assistant" and item.get("tools_used"):
+                st.caption(f"Tool Used: {item['tools_used']}")
 
     with st.form("chat_form", clear_on_submit=True):
         user_message = st.text_input(
@@ -138,22 +135,37 @@ def render_chat() -> None:
         submitted = st.form_submit_button("Send", use_container_width=True)
 
     if submitted and user_message.strip():
+        st.session_state.chat_history.append({"speaker": "user", "text": user_message})
         try:
-            request = UserInput(role=st.session_state.role, query=user_message)
-            prior_history = [
-                {"speaker": history_item["speaker"], "text": history_item["text"]}
-                for history_item in st.session_state.chat_history
-            ]
-            result = st.session_state.agent.run(request, chat_history=prior_history)
-            log_result(DEFAULT_LOG_PATH, result)
+            profile = st.session_state.user_profile
+            role_map = {
+                "customer": "customer",
+                "manager": "manager",
+                "branch_manager": "manager",
+                "risk": "risk",
+                "risk_compliance_officer": "risk",
+                "admin": "admin",
+                "support": "support",
+                "customer_support_agent": "support",
+            }
+            raw_role = str(st.session_state.role).lower().replace(" & ", " ").replace(" ", "_")
+            normalized_role = role_map.get(raw_role, str(profile.get("role", "customer")).lower())
+            customer_id = profile.get("customer_id", "")
+            branch = profile.get("branch", "")
+            result = st.session_state.agent.run(
+                user_message,
+                role=normalized_role,
+                customer_id=customer_id,
+                branch=branch,
+                auth_user_id=profile.get("id", ""),
+                user_jwt=profile.get("access_token", ""),
+            )
 
-            st.session_state.chat_history.append({"speaker": "user", "text": user_message})
             st.session_state.chat_history.append(
                 {
                     "speaker": "assistant",
-                    "text": result.output,
-                    "sources": result.metadata.get("sources", ""),
-                    "confidence_score": result.metadata.get("confidence_score", ""),
+                    "text": result.get("response", ""),
+                    "tools_used": ", ".join(result.get("tools_used", [])),
                 }
             )
             st.session_state.latest_error = ""

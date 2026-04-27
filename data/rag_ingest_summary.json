@@ -19,6 +19,6 @@
   "embedding_dimension": 1536,
   "collection_name": "banking_rag_chunks",
   "zilliz_endpoint": "https://in03-5ecec73c147f2d6.serverless.aws-eu-central-1.cloud.zilliz.com",
-  "zilliz_cluster_id": "in03-5ecec73c147f2d6",
+  "zilliz_cluster_id": "key-wfkejdfemvgrijsgcsfoxt",
   "inserted_rows": 62
 }

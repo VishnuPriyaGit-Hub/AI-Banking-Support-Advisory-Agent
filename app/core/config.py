@@ -17,8 +17,10 @@ DEMO_LOG_PATH = LOG_DIR / "sample_interactions.jsonl"
 PHASE2_PROMPT_PATH = PROMPTS_DIR / "phase2" / "system_prompt.txt"
 PHASE3_PROMPT_PATH = PROMPTS_DIR / "phase3" / "system_prompt.txt"
 PHASE4_PROMPT_PATH = PROMPTS_DIR / "phase4" / "system_prompt.txt"
+PHASE5_PROMPT_PATH = PROMPTS_DIR / "phase5" / "system_prompt.txt"
 AUTH_DB_PATH = DATA_DIR / "banking_auth.db"
 RAG_SUMMARY_PATH = DATA_DIR / "rag_ingest_summary.json"
+PHASE5_SUPABASE_SCHEMA_PATH = DATA_DIR / "phase5_supabase_schema.sql"
 
 ALLOWED_ROLES = {
     "customer": "Customer",

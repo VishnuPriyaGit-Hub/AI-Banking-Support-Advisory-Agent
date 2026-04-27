@@ -268,3 +268,128 @@ After loading:
 
 - vectors are inserted into the configured Zilliz / Milvus collection
 - a small summary file is written to `data/rag_ingest_summary.json`
+
+## Phase 5 Tools
+
+Minimal Phase 5 scaffolding has been added for:
+
+- Calculator tool
+- Supabase customer/loan/transaction tool
+- SearchAPI interest-rate lookup tool
+- RAG retrieval tool
+- MCP-style local server/client registry
+- LangGraph baseline agent scaffold
+
+Key files:
+
+- `app/tools/calculator.py`
+- `app/tools/supabase_tool.py`
+- `app/tools/searchapi_tool.py`
+- `app/tools/rag_tool.py`
+- `app/tools/langgraph_tools.py`
+- `app/mcp/server.py`
+- `app/mcp/client.py`
+- `app/agents/langgraph_agent.py`
+- `data/phase5_supabase_schema.sql`
+
+Suggested `.env` additions:
+
+```env
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+
+SEARCHAPI_BASE_URL=your_searchapi_endpoint
+SEARCHAPI_API_KEY=your_searchapi_key
+```
+
+Run the LangGraph baseline agent:
+
+```powershell
+python -m app.agents.langgraph_agent --role customer --customer-id C001 --query "Show my latest 5 transactions"
+```
+
+### Phase 5 Prompt
+
+The Phase 5 system prompt is now stored in:
+
+- `prompts/phase5/system_prompt.txt`
+
+#### Before Change
+
+This was the original hardcoded prompt inside `app/agents/langgraph_agent.py`:
+
+```text
+You are the Phase 5 banking baseline agent. Choose tools automatically when needed. Use calculator for arithmetic. Use Supabase tools for customer, loan, branch, and transaction data. Use search_api for external rate lookup. Use rag_retrieval for internal banking document context. Respect role boundaries: customer sees only own data, manager sees only branch data, admin/support/risk can view all data, support can update only CustomerName, Address, City, and State, admin can add or delete users. If a tool is not needed, answer directly and briefly.
+```
+
+#### After Change
+
+This is the current file-based Phase 5 prompt:
+
+```text
+You are the Phase 5 banking baseline agent.
+
+Choose tools automatically when needed.
+Use calculator for arithmetic and amount calculations.
+Use Supabase tools for customer, loan, branch, and transaction data.
+Use search_api for external rate lookup when internal context is weak or unavailable.
+Use rag_retrieval for internal banking document context first.
+
+Respect role boundaries:
+- customer sees only own data
+- manager sees only branch data
+- admin, support, and risk can view all customer data
+- support can update only CustomerName, Address, City, and State
+- admin can add or delete users
+
+When internal RAG results are weak, incomplete, or do not answer the exact user query, prefer search_api as fallback.
+For comparison questions, combine internal RAG context and external search results before answering.
+If a tool is not needed, answer directly and briefly.
+Always produce a customer-friendly final response instead of raw tool output.
+```
+
+### Phase 5 Failures and Corrections
+
+#### 1. Customer and Manager Authorization Path
+
+Failure:
+
+- Protected data requests were sometimes denied before the correct Supabase read path ran.
+
+Correction:
+
+- Protected customer and manager queries now use direct Supabase calls with the logged-in user JWT so that Supabase RLS can evaluate the real authenticated user.
+
+#### 2. Branch Manager Returned Empty Rows
+
+Failure:
+
+- Branch-manager queries returned empty lists even though data existed.
+
+Correction:
+
+- The app now loads `role` and `branch` during login more reliably.
+- Manager reads now rely on Supabase RLS with the manager JWT instead of depending on an extra app-side branch filter.
+- Branch and role matching in Supabase should use trimmed values to avoid whitespace mismatch.
+
+#### 3. RAG Did Not Fall Back to Internet Search
+
+Failure:
+
+- Search fallback was triggered only when RAG returned zero matches.
+- Weak but irrelevant RAG matches prevented `search_api` from running.
+
+Correction:
+
+- Search fallback now runs when RAG has no matches, when confidence is low, or when the retrieved text does not contain the key query terms.
+
+#### 4. Prompt Was Hardcoded
+
+Failure:
+
+- The Phase 5 prompt was embedded directly in the agent code.
+
+Correction:
+
+- The prompt is now stored under `prompts/phase5/system_prompt.txt` and loaded through `app/core/prompts.py`.
