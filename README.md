@@ -279,6 +279,9 @@ Minimal Phase 5 scaffolding has been added for:
 - RAG retrieval tool
 - MCP-style local server/client registry
 - LangGraph baseline agent scaffold
+- LangGraph multi-agent banking assistant with planner, risk/compliance, MCP tool execution, and response-generation nodes
+- Local escalation queue for branch manager and risk-team notifications
+- Short-term chat context plus long-term conversation memory with a 60-day inactivity retention policy
 
 Key files:
 
@@ -290,6 +293,12 @@ Key files:
 - `app/mcp/server.py`
 - `app/mcp/client.py`
 - `app/agents/langgraph_agent.py`
+- `prompts/phase6/system_prompt.txt`
+- `prompts/phase6/rewrite_query_prompt.txt`
+- `prompts/phase6/calculation_prompt.txt`
+- `prompts/phase6/response_prompt.txt`
+- `app/memory/store.py`
+- `app/tools/escalation_tool.py`
 - `data/phase5_supabase_schema.sql`
 
 Suggested `.env` additions:
@@ -308,6 +317,50 @@ Run the LangGraph baseline agent:
 ```powershell
 python -m app.agents.langgraph_agent --role customer --customer-id C001 --query "Show my latest 5 transactions"
 ```
+
+Run the Streamlit UI:
+
+```powershell
+streamlit run app/ui/streamlit_app.py
+```
+
+### Multi-Agent Flow
+
+The current Phase 5 implementation follows this orchestration:
+
+```text
+User Query
+-> Streamlit UI
+-> LangGraph Orchestration
+-> Planner Agent
+-> Risk & Compliance Agent
+-> MCP Tool Calls
+-> Risk & Compliance Check
+-> Response Generation Agent
+-> Final Response
+```
+
+Routes:
+
+- General banking query: RAG first, then SearchAPI if RAG confidence is `<= 0.75`.
+- Personalized query: risk check, role-aware DB fetch, masked response.
+- Calculation query: fetch needed context, call the calculator tool, then explain the result.
+- Escalation query: risk check, create escalation, return a safe customer-facing response.
+
+Escalations are written to `logs/escalations.jsonl`. Branch managers can view branch escalations from the Streamlit sidebar, and risk users can view high-risk notifications. Agent audit logs include route, risk level, tools used, confidence score, and final response.
+
+Branch-manager human-in-the-loop flow:
+
+- Medium-risk cases are created with `status=open` and `target=branch_manager`.
+- A branch manager can open **Show escalations** in the Streamlit sidebar, then approve, reject, or respond with a customer-facing message.
+- The next time the linked customer logs in, the app shows the manager response in a dialog when Streamlit supports dialogs, or as an in-page notification fallback.
+- Once the customer acknowledges the response, the escalation is marked as viewed.
+
+Memory:
+
+- Short-term memory uses the active Streamlit chat history.
+- Long-term memory writes to `data/conversation_memory.jsonl` and, when configured, Supabase `conversation_memory`.
+- Memory is pruned after 60 days of inactivity and can be deleted from the Streamlit sidebar.
 
 ### Phase 5 Prompt
 

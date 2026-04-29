@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.config import PHASE2_PROMPT_PATH, PHASE3_PROMPT_PATH, PHASE4_PROMPT_PATH, PHASE5_PROMPT_PATH
+from app.core.config import (
+    PHASE2_PROMPT_PATH,
+    PHASE3_PROMPT_PATH,
+    PHASE4_PROMPT_PATH,
+    PHASE5_PROMPT_PATH,
+    PHASE6_CALCULATION_PROMPT_PATH,
+    PHASE6_PLANNER_PROMPT_PATH,
+    PHASE6_RESPONSE_PROMPT_PATH,
+    PHASE6_REWRITE_PROMPT_PATH,
+    PHASE6_SYSTEM_PROMPT_PATH,
+)
 
 
 def _read_prompt(prompt_path: Path) -> str:
@@ -22,4 +32,24 @@ def load_phase4_prompt(prompt_path: Path = PHASE4_PROMPT_PATH) -> str:
 
 
 def load_phase5_prompt(prompt_path: Path = PHASE5_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_system_prompt(prompt_path: Path = PHASE6_SYSTEM_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_planner_prompt(prompt_path: Path = PHASE6_PLANNER_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_rewrite_prompt(prompt_path: Path = PHASE6_REWRITE_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_calculation_prompt(prompt_path: Path = PHASE6_CALCULATION_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_response_prompt(prompt_path: Path = PHASE6_RESPONSE_PROMPT_PATH) -> str:
     return _read_prompt(prompt_path)

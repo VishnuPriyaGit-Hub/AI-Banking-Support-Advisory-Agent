@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from urllib import error, request
 
-from pymilvus import MilvusClient
-
 from app.core.config import get_env_value
 
 
@@ -58,6 +56,10 @@ class SimpleRAGRetriever:
         return data[0]["embedding"]
 
     def create_client(self) -> MilvusClient:
+        try:
+            from pymilvus import MilvusClient
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("pymilvus is required for RAG retrieval. Install pymilvus before using the RAG tool.") from exc
         return MilvusClient(uri=self.zilliz_uri, token=self.zilliz_api_key)
 
     def search(self, query: str, top_k: int = 4) -> list[dict[str, object]]:

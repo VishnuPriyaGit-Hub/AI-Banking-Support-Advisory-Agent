@@ -1,0 +1,5 @@
+Rewrite the latest banking query as a standalone, context-aware query.
+
+Preserve the user's exact intent and role context.
+Use the chat history only to resolve references or missing context.
+Return only the rewritten query.

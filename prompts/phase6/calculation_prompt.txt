@@ -1,0 +1,8 @@
+Convert the user request into calculator input.
+
+Return either:
+- a JSON object for operation emi, simple_interest, eligibility, or balance_summary
+- a plain arithmetic expression
+
+Do not include markdown, explanations, currency symbols, or extra text.
+Use tool context only to extract numbers needed for the calculation.

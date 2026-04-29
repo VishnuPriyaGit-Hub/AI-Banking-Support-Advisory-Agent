@@ -4,6 +4,7 @@ create table if not exists public.Customers (
     Branch text not null,
     City text,
     State text,
+    Pincode text,
     Address text,
     Email text,
     Phone text,
@@ -46,6 +47,21 @@ create table if not exists public.UserRoles (
     branch text,
     CreatedAt timestamp default current_timestamp
 );
+
+create table if not exists public.conversation_memory (
+    id bigint generated always as identity primary key,
+    user_id text not null,
+    role text,
+    query text not null,
+    response text not null,
+    route text,
+    risk_level text,
+    last_active_at timestamptz default now(),
+    created_at timestamptz default now()
+);
+
+create index if not exists conversation_memory_user_id_idx on public.conversation_memory(user_id);
+create index if not exists conversation_memory_last_active_at_idx on public.conversation_memory(last_active_at);
 
 insert into public.Customers (CustomerID, CustomerName, Branch, City, State, Address, Email, Phone, Balance, CreditScore, AuthUserID) values
 ('C001','Asha Menon','Chennai Main','Chennai','Tamil Nadu','12 Lake Road','asha@example.com','9000000001',145000.00,742,'11111111-1111-1111-1111-111111111001'),

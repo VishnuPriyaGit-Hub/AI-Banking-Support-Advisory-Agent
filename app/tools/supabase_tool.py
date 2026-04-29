@@ -71,20 +71,34 @@ class SupabaseTool:
         )
 
     def get_customer_snapshot(self, customer_id: str) -> dict[str, object]:
-        customer = self._request("GET", "customers", params={"customerid": f"eq.{customer_id}", "select": "*"})
-        loans = self._request("GET", "loanaccounts", params={"customerid": f"eq.{customer_id}", "select": "*"})
+        customer = self._request(
+            "GET",
+            "customers",
+            params={
+                "customerid": f"eq.{customer_id}",
+                "select": "customerid,customername,branch,city,state,balance,creditscore",
+            },
+        )
+        loans = self._request(
+            "GET",
+            "loanaccounts",
+            params={
+                "customerid": f"eq.{customer_id}",
+                "select": "loanaccountid,loantype,loanamount,interestrate,tenuremonths,emi,outstandingbalance,loanstatus",
+            },
+        )
         transactions = self._request(
             "GET",
             "transactions",
             params={
                 "customerid": f"eq.{customer_id}",
-                "select": "*",
+                "select": "transactionid,transactiondate,transactiontype,amount,merchant,category,balanceafter",
                 "order": "transactiondate.desc",
                 "limit": "5",
             },
         )
         return {
-            "customer": customer,
+            "customer": mask_customer_rows(customer),
             "loans": loans,
             "transactions": transactions,
         }
@@ -93,11 +107,66 @@ class SupabaseTool:
         return self._request(
             "GET",
             "customers",
-            params={"branch": f"eq.{branch}", "select": "*", "order": "customername.asc"},
+            params={
+                "branch": f"eq.{branch}",
+                "select": "customerid,customername,branch,city,state,balance,creditscore",
+                "order": "customername.asc",
+            },
         )
 
+    def get_branch_loan_customers(self, branch: str) -> list[dict]:
+        customers = self.get_branch_customers(branch)
+        if not isinstance(customers, list) or not customers:
+            return []
+
+        customer_lookup = {
+            str(customer.get("customerid", "")): customer
+            for customer in customers
+            if isinstance(customer, dict) and customer.get("customerid")
+        }
+        if not customer_lookup:
+            return []
+
+        customer_ids = ",".join(customer_lookup)
+        loans = self._request(
+            "GET",
+            "loanaccounts",
+            params={
+                "customerid": f"in.({customer_ids})",
+                "select": "customerid,loantype,loanamount,interestrate,tenuremonths,emi,outstandingbalance,loanstatus",
+                "order": "customerid.asc",
+            },
+        )
+        if not isinstance(loans, list):
+            return []
+
+        results: list[dict[str, object]] = []
+        for loan in loans:
+            if not isinstance(loan, dict):
+                continue
+            customer = customer_lookup.get(str(loan.get("customerid", "")), {})
+            results.append(
+                {
+                    "customer_name": customer.get("customername", ""),
+                    "customer_id": mask_identifier(str(customer.get("customerid", ""))),
+                    "branch": customer.get("branch", branch),
+                    "loan_type": loan.get("loantype", ""),
+                    "loan_amount": loan.get("loanamount", ""),
+                    "interest_rate": loan.get("interestrate", ""),
+                    "tenure_months": loan.get("tenuremonths", ""),
+                    "emi": loan.get("emi", ""),
+                    "outstanding_balance": loan.get("outstandingbalance", ""),
+                    "loan_status": loan.get("loanstatus", ""),
+                }
+            )
+        return results
+
     def get_all_customers(self) -> list[dict]:
-        return self._request("GET", "customers", params={"select": "*", "order": "customername.asc"})
+        return self._request(
+            "GET",
+            "customers",
+            params={"select": "customerid,customername,branch,city,state,balance,creditscore", "order": "customername.asc"},
+        )
 
     def add_customer(self, payload: dict) -> dict | list[dict]:
         return self._request("POST", "customers", body=payload, use_service_role=True)
@@ -116,6 +185,8 @@ class SupabaseTool:
             "Address": "address",
             "City": "city",
             "State": "state",
+            "Phone": "phone",
+            "Pincode": "pincode",
         }
         allowed = {mapping[key]: value for key, value in payload.items() if key in mapping}
         return self._request(
@@ -148,6 +219,11 @@ def get_branch_customers_tool(branch: str) -> str:
     return json.dumps(client.get_branch_customers(branch), indent=2)
 
 
+def get_branch_loan_customers_tool(branch: str) -> str:
+    client = SupabaseTool()
+    return json.dumps(client.get_branch_loan_customers(branch), indent=2)
+
+
 def get_all_customers_tool(_: str = "") -> str:
     client = SupabaseTool()
     return json.dumps(client.get_all_customers(), indent=2)
@@ -169,3 +245,24 @@ def add_customer_tool(payload_json: str) -> str:
 def delete_customer_tool(customer_id: str) -> str:
     client = SupabaseTool()
     return json.dumps(client.delete_customer(customer_id), indent=2)
+
+
+def mask_customer_rows(rows: object) -> object:
+    if not isinstance(rows, list):
+        return rows
+    masked = []
+    for row in rows:
+        if not isinstance(row, dict):
+            masked.append(row)
+            continue
+        item = dict(row)
+        if item.get("customerid"):
+            item["customerid"] = mask_identifier(str(item["customerid"]))
+        masked.append(item)
+    return masked
+
+
+def mask_identifier(value: str) -> str:
+    if len(value) <= 2:
+        return "**"
+    return f"{value[:1]}***{value[-1:]}"
