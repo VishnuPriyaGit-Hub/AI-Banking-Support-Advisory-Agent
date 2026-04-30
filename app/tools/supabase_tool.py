@@ -103,6 +103,18 @@ class SupabaseTool:
             "transactions": transactions,
         }
 
+    def get_customer_loans(self, customer_id: str) -> dict[str, object]:
+        loans = self._request(
+            "GET",
+            "loanaccounts",
+            params={
+                "customerid": f"eq.{customer_id}",
+                "select": "loanaccountid,loantype,loanamount,interestrate,tenuremonths,emi,outstandingbalance,loanstatus",
+                "order": "loanaccountid.asc",
+            },
+        )
+        return {"loans": loans}
+
     def get_branch_customers(self, branch: str) -> list[dict]:
         return self._request(
             "GET",
@@ -169,7 +181,7 @@ class SupabaseTool:
         )
 
     def add_customer(self, payload: dict) -> dict | list[dict]:
-        return self._request("POST", "customers", body=payload, use_service_role=True)
+        return self._request("POST", "customers", body=normalize_customer_payload(payload), use_service_role=True)
 
     def delete_customer(self, customer_id: str) -> dict | list[dict]:
         return self._request(
@@ -197,17 +209,6 @@ class SupabaseTool:
             use_service_role=True,
         )
 
-    def add_customer(self, payload: dict) -> dict | list[dict]:
-        return self._request("POST", "customers", body=payload, use_service_role=True)
-
-    def delete_customer(self, customer_id: str) -> dict | list[dict]:
-        return self._request(
-            "DELETE",
-            "customers",
-            params={"customerid": f"eq.{customer_id}"},
-            use_service_role=True,
-        )
-
 
 def get_customer_snapshot_tool(customer_id: str) -> str:
     client = SupabaseTool()
@@ -231,7 +232,7 @@ def get_all_customers_tool(_: str = "") -> str:
 
 def update_customer_contact_tool(payload_json: str) -> str:
     payload = json.loads(payload_json)
-    customer_id = payload.pop("CustomerID")
+    customer_id = payload.pop("CustomerID", payload.pop("customerid", ""))
     client = SupabaseTool()
     return json.dumps(client.update_customer_contact(customer_id, payload), indent=2)
 
@@ -245,6 +246,25 @@ def add_customer_tool(payload_json: str) -> str:
 def delete_customer_tool(customer_id: str) -> str:
     client = SupabaseTool()
     return json.dumps(client.delete_customer(customer_id), indent=2)
+
+
+def normalize_customer_payload(payload: dict) -> dict:
+    mapping = {
+        "CustomerID": "customerid",
+        "CustomerName": "customername",
+        "Branch": "branch",
+        "City": "city",
+        "State": "state",
+        "Pincode": "pincode",
+        "Address": "address",
+        "Email": "email",
+        "Phone": "phone",
+        "Balance": "balance",
+        "CreditScore": "creditscore",
+        "AuthUserID": "authuserid",
+        "CreatedAt": "createdat",
+    }
+    return {mapping.get(str(key), str(key).lower()): value for key, value in payload.items()}
 
 
 def mask_customer_rows(rows: object) -> object:

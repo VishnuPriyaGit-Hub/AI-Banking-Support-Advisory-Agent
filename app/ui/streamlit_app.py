@@ -29,6 +29,7 @@ def init_session_state() -> None:
         "manager_response_checked": False,
         "pending_manager_responses": [],
         "pending_user_message": "",
+        "feedback_status": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -45,6 +46,7 @@ def reset_session() -> None:
     st.session_state.manager_response_checked = False
     st.session_state.pending_manager_responses = []
     st.session_state.pending_user_message = ""
+    st.session_state.feedback_status = ""
 
 
 def handle_login(email: str, password: str) -> None:
@@ -66,6 +68,36 @@ def handle_login(email: str, password: str) -> None:
     st.session_state.manager_response_checked = False
     st.session_state.pending_manager_responses = []
     st.session_state.pending_user_message = ""
+    st.session_state.feedback_status = ""
+    st.rerun()
+
+
+def normalized_session_role() -> str:
+    profile = st.session_state.user_profile
+    role_map = {
+        "customer": "customer",
+        "manager": "manager",
+        "branch_manager": "manager",
+        "risk": "risk",
+        "risk_compliance_officer": "risk",
+        "admin": "admin",
+        "support": "support",
+        "customer_support_agent": "support",
+    }
+    raw_role = str(st.session_state.role).lower().replace(" & ", " ").replace(" ", "_")
+    return role_map.get(raw_role, str(profile.get("role", "customer")).lower())
+
+
+def profile_customer_id(profile: dict[str, object] | None = None) -> str:
+    profile = profile or st.session_state.user_profile
+    return str(profile.get("customer_id") or profile.get("customerid") or "")
+
+
+def submit_sidebar_query(query: str) -> None:
+    if st.session_state.pending_user_message:
+        return
+    st.session_state.chat_history.append({"speaker": "user", "text": query})
+    st.session_state.pending_user_message = query
     st.rerun()
 
 
@@ -99,19 +131,41 @@ def render_sidebar() -> None:
         profile = st.session_state.user_profile
         if profile.get("branch"):
             st.write(f"Branch: {profile['branch']}")
-        if profile.get("customer_id"):
-            st.write(f"Customer ID: {profile['customer_id']}")
+        customer_id = profile_customer_id(profile)
+        if customer_id:
+            st.write(f"Customer ID: {customer_id}")
 
         st.divider()
-        st.subheader("Try These Queries")
+        memory_user_id = profile.get("id") or customer_id or st.session_state.user_name or st.session_state.role
+        recent_queries = ConversationMemory(user_jwt=profile.get("access_token", "")).recent_queries(str(memory_user_id))
         examples = [
             "What is EMI?",
             "Tell me about loans",
             "Transfer 10000 to this account",
             "My account was hacked",
         ]
-        for example in examples:
-            st.write(f"- {example}")
+        if recent_queries:
+            st.subheader("Previous Queries")
+            for index, query in enumerate(recent_queries):
+                st.button(
+                    query,
+                    key=f"recent_query_{index}",
+                    use_container_width=True,
+                    disabled=bool(st.session_state.pending_user_message),
+                    on_click=submit_sidebar_query,
+                    args=(query,),
+                )
+        else:
+            st.subheader("Try Me")
+            for index, example in enumerate(examples):
+                st.button(
+                    example,
+                    key=f"try_query_{index}",
+                    use_container_width=True,
+                    disabled=bool(st.session_state.pending_user_message),
+                    on_click=submit_sidebar_query,
+                    args=(example,),
+                )
 
         st.divider()
         if st.session_state.role in {"manager", "branch_manager", "risk", "risk_compliance_officer", "admin", "support", "customer_support_agent"}:
@@ -121,7 +175,7 @@ def render_sidebar() -> None:
             )
 
         if st.button("Delete my memory", use_container_width=True):
-            user_id = profile.get("id") or profile.get("customer_id") or st.session_state.role
+            user_id = profile.get("id") or profile_customer_id(profile) or st.session_state.role
             removed = ConversationMemory(user_jwt=profile.get("access_token", "")).delete_user_memory(str(user_id))
             st.success(f"Deleted {removed} local memory record(s).")
 
@@ -370,7 +424,7 @@ def load_customer_manager_responses() -> None:
     st.session_state.manager_response_checked = True
     profile = st.session_state.user_profile
     role = str(st.session_state.role).lower()
-    customer_id = profile.get("customer_id", "")
+    customer_id = profile_customer_id(profile)
     if role != "customer" or not customer_id:
         st.session_state.pending_manager_responses = []
         return
@@ -416,6 +470,64 @@ def render_customer_manager_responses() -> None:
             st.rerun()
 
 
+def render_feedback_widget(item: dict[str, object], index: int, previous_user_query: str) -> None:
+    if item.get("feedback_saved"):
+        st.caption("Feedback saved for future interactions.")
+        return
+
+    with st.expander("Give feedback", expanded=False):
+        with st.form(f"feedback_form_{index}", clear_on_submit=True):
+            rating = st.radio(
+                "Was this helpful?",
+                ["helpful", "not_helpful"],
+                format_func=lambda value: "Helpful" if value == "helpful" else "Not helpful",
+                horizontal=True,
+                key=f"feedback_rating_{index}",
+            )
+            tags = st.multiselect(
+                "What should change next time?",
+                [
+                    "too technical",
+                    "too simple",
+                    "too vague",
+                    "too long",
+                    "too short",
+                    "need steps",
+                    "need calculation",
+                    "wrong route",
+                ],
+                key=f"feedback_tags_{index}",
+            )
+            comment = st.text_area(
+                "Optional comment",
+                placeholder="Example: Explain this in simpler terms next time.",
+                key=f"feedback_comment_{index}",
+            )
+            submitted = st.form_submit_button("Save feedback", use_container_width=True)
+
+    if not submitted:
+        return
+
+    profile = st.session_state.user_profile
+    user_id = profile.get("id") or profile_customer_id(profile) or st.session_state.user_name or normalized_session_role()
+    memory = ConversationMemory(user_jwt=profile.get("access_token", ""))
+    record = memory.save_feedback(
+        user_id=str(user_id),
+        role=normalized_session_role(),
+        query=previous_user_query,
+        response=str(item.get("text", "")),
+        route=str(item.get("route", "")),
+        risk_level=str(item.get("risk_level", "")),
+        rating=rating,
+        tags=tags,
+        comment=comment,
+    )
+    item["feedback_saved"] = True
+    item["preference_summary"] = record.get("preference_summary", "")
+    st.session_state.feedback_status = "Feedback saved. Future answers will use this preference where it is safe to do so."
+    st.rerun()
+
+
 def render_chat() -> None:
     st.title("Banking Support Agent")
     st.caption("LangGraph agent")
@@ -430,10 +542,15 @@ def render_chat() -> None:
 
     if st.session_state.latest_error:
         st.error(st.session_state.latest_error)
+    if st.session_state.feedback_status:
+        st.success(st.session_state.feedback_status)
 
-    for item in st.session_state.chat_history:
+    last_user_query = ""
+    for index, item in enumerate(st.session_state.chat_history):
         with st.chat_message(item["speaker"]):
             st.write(item["text"])
+            if item["speaker"] == "user":
+                last_user_query = str(item.get("text", ""))
             if item["speaker"] == "assistant" and item.get("sources"):
                 st.caption(f"Sources: {item['sources']}")
             if item["speaker"] == "assistant" and item.get("confidence_score"):
@@ -442,6 +559,10 @@ def render_chat() -> None:
                 st.caption(f"Tool Used: {item['tools_used']}")
             if item["speaker"] == "assistant" and item.get("route"):
                 st.caption(f"Route: {item['route']} | Risk: {item.get('risk_level', '')}")
+            if item["speaker"] == "assistant" and item.get("adaptation_note"):
+                st.caption(str(item["adaptation_note"]))
+            if item["speaker"] == "assistant":
+                render_feedback_widget(item, index, last_user_query)
 
     pending_message = st.session_state.pending_user_message
     user_message = st.chat_input("Ask a banking question", disabled=bool(pending_message))
@@ -455,20 +576,11 @@ def render_chat() -> None:
         pending_message = st.session_state.pending_user_message
         try:
             profile = st.session_state.user_profile
-            role_map = {
-                "customer": "customer",
-                "manager": "manager",
-                "branch_manager": "manager",
-                "risk": "risk",
-                "risk_compliance_officer": "risk",
-                "admin": "admin",
-                "support": "support",
-                "customer_support_agent": "support",
-            }
-            raw_role = str(st.session_state.role).lower().replace(" & ", " ").replace(" ", "_")
-            normalized_role = role_map.get(raw_role, str(profile.get("role", "customer")).lower())
-            customer_id = profile.get("customer_id", "")
+            normalized_role = normalized_session_role()
+            customer_id = profile_customer_id(profile)
             branch = profile.get("branch", "")
+            memory_user_id = profile.get("id") or customer_id or st.session_state.user_name or normalized_role
+            behavior_preferences = ConversationMemory(user_jwt=profile.get("access_token", "")).behavior_preferences(str(memory_user_id))
             with st.spinner("Processing your request..."):
                 result = st.session_state.agent.run(
                     pending_message,
@@ -478,6 +590,7 @@ def render_chat() -> None:
                     auth_user_id=profile.get("id", ""),
                     user_jwt=profile.get("access_token", ""),
                     chat_history=st.session_state.chat_history,
+                    behavior_preferences=behavior_preferences,
                 )
 
             st.session_state.chat_history.append(
@@ -488,6 +601,7 @@ def render_chat() -> None:
                     "route": result.get("route", ""),
                     "risk_level": result.get("risk_level", ""),
                     "confidence_score": result.get("confidence_score", 0.0),
+                    "adaptation_note": result.get("adaptation_note", ""),
                 }
             )
             st.session_state.latest_error = ""

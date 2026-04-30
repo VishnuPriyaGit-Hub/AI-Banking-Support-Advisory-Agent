@@ -58,6 +58,8 @@ class SupabaseAuthClient:
         role_row = role_rows[0] if isinstance(role_rows, list) and role_rows else {}
         customer_rows = tool.get_customer_by_auth_user(str(user.get("id")))
         customer_row = customer_rows[0] if isinstance(customer_rows, list) and customer_rows else {}
+        customer_id = customer_row.get("customerid", "")
+        customer_name = customer_row.get("customername", user.get("email", ""))
 
         return {
             "id": str(user.get("id", "")),
@@ -65,6 +67,8 @@ class SupabaseAuthClient:
             "access_token": access_token,
             "role": role_row.get("role", ""),
             "branch": role_row.get("branch", ""),
-            "customer_id": customer_row.get("customerid", ""),
-            "customer_name": customer_row.get("customername", user.get("email", "")),
+            "customer_id": customer_id,
+            "customerid": customer_id,
+            "customer_name": customer_name,
+            "customername": customer_name,
         }

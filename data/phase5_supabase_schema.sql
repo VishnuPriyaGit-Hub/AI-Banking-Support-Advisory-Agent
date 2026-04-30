@@ -50,18 +50,30 @@ create table if not exists public.UserRoles (
 
 create table if not exists public.conversation_memory (
     id bigint generated always as identity primary key,
+    entry_type text default 'conversation',
     user_id text not null,
     role text,
     query text not null,
     response text not null,
     route text,
     risk_level text,
+    feedback_rating text,
+    feedback_tags jsonb,
+    feedback_comment text,
+    preference_summary text,
     last_active_at timestamptz default now(),
     created_at timestamptz default now()
 );
 
+alter table public.conversation_memory add column if not exists entry_type text default 'conversation';
+alter table public.conversation_memory add column if not exists feedback_rating text;
+alter table public.conversation_memory add column if not exists feedback_tags jsonb;
+alter table public.conversation_memory add column if not exists feedback_comment text;
+alter table public.conversation_memory add column if not exists preference_summary text;
+
 create index if not exists conversation_memory_user_id_idx on public.conversation_memory(user_id);
 create index if not exists conversation_memory_last_active_at_idx on public.conversation_memory(last_active_at);
+create index if not exists conversation_memory_entry_type_idx on public.conversation_memory(entry_type);
 
 insert into public.Customers (CustomerID, CustomerName, Branch, City, State, Address, Email, Phone, Balance, CreditScore, AuthUserID) values
 ('C001','Asha Menon','Chennai Main','Chennai','Tamil Nadu','12 Lake Road','asha@example.com','9000000001',145000.00,742,'11111111-1111-1111-1111-111111111001'),

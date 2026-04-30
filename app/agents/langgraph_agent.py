@@ -50,6 +50,8 @@ class BankingState(TypedDict, total=False):
     tool_outputs: dict[str, str]
     confidence_score: float
     final_response: str
+    behavior_preferences: str
+    adaptation_note: str
     blocked: bool
     escalated_to: str
     logs: list[dict[str, Any]]
@@ -82,6 +84,7 @@ class MultiAgentBankingAssistant:
         auth_user_id: str | None = None,
         user_jwt: str | None = None,
         chat_history: list[dict[str, str]] | None = None,
+        behavior_preferences: str | None = None,
     ) -> dict[str, Any]:
         role = self.normalize_role(role)
         metadata = {
@@ -90,6 +93,7 @@ class MultiAgentBankingAssistant:
             "branch": branch or "",
             "auth_user_id": auth_user_id or "",
             "user_jwt": user_jwt or "",
+            "behavior_preferences": redact_text(behavior_preferences or ""),
         }
         memory = ConversationMemory(user_jwt=user_jwt)
         memory.prune_inactive(days=60)
@@ -100,6 +104,7 @@ class MultiAgentBankingAssistant:
             "tool_outputs": {},
             "logs": [],
             "confidence_score": 0.0,
+            "behavior_preferences": redact_text(behavior_preferences or ""),
         }
         if self.graph is not None:
             final_state = self.graph.invoke(state)
@@ -118,7 +123,7 @@ class MultiAgentBankingAssistant:
         return {
             "agent": "MultiAgentBankingAssistant",
             "model": self.model_name,
-            "context": {key: value for key, value in metadata.items() if key != "user_jwt"},
+            "context": {key: value for key, value in metadata.items() if key not in {"user_jwt", "behavior_preferences"}},
             "route": final_state.get("route", ""),
             "risk_level": final_state.get("risk_level", ""),
             "risk_reason": final_state.get("risk_reason", ""),
@@ -127,6 +132,7 @@ class MultiAgentBankingAssistant:
             "required_tools": final_state.get("required_tools", []),
             "escalated_to": final_state.get("escalated_to", ""),
             "response": final_state.get("final_response", ""),
+            "adaptation_note": final_state.get("adaptation_note", ""),
             "logs": final_state.get("logs", []),
         }
 
@@ -245,6 +251,7 @@ class MultiAgentBankingAssistant:
         else:
             response = self._generate_response(state)
         state["final_response"] = response
+        state["adaptation_note"] = self._adaptation_note(state)
         self._add_step_log(state, "response_generation", final_response=self._storage_safe_response(state))
         return state
 
@@ -265,6 +272,7 @@ class MultiAgentBankingAssistant:
             "role": metadata.get("role", ""),
             "branch_present": bool(metadata.get("branch")),
             "customer_profile_present": bool(metadata.get("customer_id")),
+            "behavior_preferences": redact_text(str(metadata.get("behavior_preferences", ""))),
         }
         prompt = (
             f"{self.planner_prompt}\n\n"
@@ -471,6 +479,9 @@ class MultiAgentBankingAssistant:
         try:
             client = SupabaseTool(user_jwt=jwt)
             if role == "customer":
+                query = state.get("user_query", "").lower()
+                if "loan" in query and not any(token in query for token in ["balance", "transaction", "statement"]):
+                    return json.dumps(client.get_customer_loans(metadata.get("customer_id", "")), indent=2)
                 return json.dumps(client.get_customer_snapshot(metadata.get("customer_id", "")), indent=2)
             if role == "manager":
                 query = state.get("user_query", "").lower()
@@ -537,6 +548,7 @@ class MultiAgentBankingAssistant:
             f"{self.response_prompt}\n\n"
             f"Route: {state.get('route')}\nRisk level: {state.get('risk_level')}\n"
             f"User role: {state.get('user_metadata', {}).get('role', '')}\n"
+            f"Safe behavior preferences from prior feedback: {redact_text(str(state.get('behavior_preferences', '')))}\n"
             f"User query: {redact_text(state.get('user_query', ''))}\nConfidence score: {state.get('confidence_score')}\n"
             f"Tool outputs:\n{json.dumps(self._redact_tool_context_for_llm(state.get('tool_outputs', {})), indent=2)[:9000]}"
         )
@@ -575,6 +587,12 @@ class MultiAgentBankingAssistant:
         if outputs:
             return redact_json_text(next(iter(outputs.values())))
         return "I could not complete this request. Please try again with a little more detail."
+
+    def _adaptation_note(self, state: BankingState) -> str:
+        preferences = redact_text(str(state.get("behavior_preferences", ""))).strip()
+        if not preferences:
+            return ""
+        return "Adapted using prior feedback preferences for tone, detail level, or answer structure. Safety and data-access rules were not changed."
 
     def _blocked_response(self, state: BankingState) -> str:
         reason = str(state.get("risk_reason", "")).lower()
@@ -627,6 +645,8 @@ class MultiAgentBankingAssistant:
             if "balance" in query and isinstance(customer, dict) and customer.get("balance") is not None:
                 return f"Your current available balance is Rs. {float(customer['balance']):,.2f}."
             if isinstance(loans, list) and loans and any(token in query for token in ["loan", "repayment", "emi"]):
+                if any(token in query for token in ["list", "various", "all", "show"]):
+                    return self._build_loan_list_response(loans, state)
                 loan_types = self._extract_safe_loan_types(raw_output)
                 if loan_types:
                     joined_types = ", ".join(loan_types)
@@ -654,6 +674,42 @@ class MultiAgentBankingAssistant:
             return f"I found {len(payload)} matching customer record(s) for your role."
 
         return "I found database information for your request."
+
+    def _build_loan_list_response(self, loans: list[object], state: BankingState) -> str:
+        preferences = str(state.get("behavior_preferences", "")).lower()
+        wants_detail = any(
+            token in preferences
+            for token in [
+                "concrete details",
+                "fuller explanation",
+                "step-by-step",
+                "balance amount",
+                "tenure",
+                "outstanding",
+            ]
+        )
+        wants_concise = "concise" in preferences and not wants_detail
+        lines = ["Here are your loan accounts:"]
+        for loan in loans:
+            if not isinstance(loan, dict):
+                continue
+            loan_type = redact_text(str(loan.get("loantype") or loan.get("loan_type") or "Loan"))
+            loan_label = loan_type if "loan" in loan_type.lower() else f"{loan_type} loan"
+            status = redact_text(str(loan.get("loanstatus") or loan.get("loan_status") or "status unavailable"))
+            if wants_detail and not wants_concise:
+                details = [loan_label, f"status: {status}"]
+                if loan.get("outstandingbalance") not in {None, ""}:
+                    details.append(f"outstanding: Rs. {float(loan.get('outstandingbalance') or 0):,.2f}")
+                if loan.get("emi") not in {None, ""}:
+                    details.append(f"EMI: Rs. {float(loan.get('emi') or 0):,.2f}")
+                if loan.get("tenuremonths") not in {None, ""}:
+                    details.append(f"tenure: {loan.get('tenuremonths')} months")
+                lines.append(f"- {' | '.join(details)}")
+            else:
+                lines.append(f"- {loan_label}: {status}")
+        if wants_detail and not wants_concise:
+            lines.append("Next step: ask about repayment options, prepayment impact, EMI details, or closure process for any listed loan.")
+        return "\n".join(lines)
 
     def _is_personalized_guidance_query(self, state: BankingState) -> bool:
         if state.get("route") != "personalized":
@@ -713,6 +769,7 @@ class MultiAgentBankingAssistant:
                 "Use the loan type only as private context. Do not mention customer name, balance, credit score, account identifiers, record counts, database fields, or internal tool names. "
                 "Answer as helpful banking guidance, and tell the customer to confirm exact terms in their loan agreement or with branch staff when needed.\n\n"
                 f"Customer question: {redact_text(state.get('user_query', ''))}\n"
+                f"Safe behavior preferences from prior feedback: {redact_text(str(state.get('behavior_preferences', '')))}\n"
                 f"Safe loan context: {loan_context}\n"
                 f"Policy context:\n{json.dumps(self._redact_tool_context_for_llm(policy_context), indent=2)[:7000]}"
             )
