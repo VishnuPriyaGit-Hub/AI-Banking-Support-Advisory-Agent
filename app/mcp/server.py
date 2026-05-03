@@ -16,6 +16,7 @@ from app.tools.supabase_tool import (
     get_all_customers_tool,
     get_branch_customers_tool,
     get_branch_loan_customers_tool,
+    get_customer_transactions_tool,
     get_customer_snapshot_tool,
     update_customer_contact_tool,
 )
@@ -25,6 +26,7 @@ def get_tool_registry() -> dict[str, object]:
     return {
         "calculator": calculator_tool,
         "supabase_customer_snapshot": get_customer_snapshot_tool,
+        "supabase_customer_transactions": get_customer_transactions_tool,
         "supabase_branch_customers": get_branch_customers_tool,
         "supabase_branch_loan_customers": get_branch_loan_customers_tool,
         "supabase_all_customers": get_all_customers_tool,

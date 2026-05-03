@@ -5,7 +5,17 @@ Return JSON only. Do not include markdown, explanations, or extra text.
 Required JSON schema:
 {
   "route": "general | personalized | calculation | escalation",
-  "required_tools": ["rag_retrieval | db_tool | calculator | search_api_if_rag_confidence_low | create_escalation"],
+  "plan_type": "default | data_lookup | personalized_guidance | calculation",
+  "required_tools": ["rag_retrieval | db_tool | calculator | search_api | search_api_if_rag_confidence_low | create_escalation"],
+  "data_scope": "none | customer_snapshot | customer_loans | customer_transactions | branch_customers | branch_loan_customers | all_customers",
+  "entities": {
+    "loan_type": "",
+    "customer_id": ""
+  },
+  "calculation_task": {
+    "operation": "none | emi | simple_interest | eligibility | balance_summary | repayment_impact",
+    "inputs": {}
+  },
   "reason": "short non-sensitive planning reason",
   "confidence": 0.0
 }
@@ -15,6 +25,13 @@ Planning rules:
 - Use "personalized" when the answer needs customer, account, loan, transaction, branch customer, or staff-authorized customer data.
 - Use "personalized" for follow-up questions about the user's existing loan/account context, even if the latest message is short.
 - Use "calculation" for EMI, interest, maturity, eligibility, repayment impact, balance summary, and numeric banking calculations.
+- For hybrid questions, select multiple tools. Examples of hybrid intent: customer-specific policy guidance needs db_tool plus rag_retrieval and possibly search; customer-specific repayment impact needs db_tool plus rag_retrieval/search_api_if_rag_confidence_low plus calculator.
+- Set plan_type to "personalized_guidance" when the user needs both their own account/loan context and banking policy/process explanation.
+- Set plan_type to "calculation" for numeric calculations, including customer-specific repayment impact or eligibility.
+- Set plan_type to "data_lookup" only when the answer is simply fetching authorized customer/account/loan/transaction data.
+- Set data_scope to the minimum data needed. Use customer_loans for customer loan-only questions, customer_transactions for transaction-only questions, customer_snapshot when balance/profile or multiple account areas are needed, branch_loan_customers for manager branch loan lists, branch_customers for manager branch customer lists, all_customers only for admin/support/risk broad authorized review, and none when DB is not needed.
+- Use entities for semantic targets such as loan_type ("personal loan", "home loan") or an explicitly provided customer_id for authorized staff review. Do not include names, phone, email, address, account numbers, PAN, Aadhaar, OTP, or credentials.
+- Use calculation_task to describe the intended calculation and numeric inputs available from the query. For customer-specific repayment impact, use operation "repayment_impact" and include inputs such as {"extra_monthly_payment": 10000}.
 - Use "escalation" for money movement, approvals, account/card blocking, legal advice, fraud, OTP/PIN/CVV/password requests, complaints, disputes, customer/account maintenance, ambiguous action requests, or anything that needs human approval.
 - Never route money movement, approvals, destructive changes, credential access, legal advice, or ambiguous banking actions as general, personalized, or calculation.
 - Do not request or reveal PII. The query and history may already be redacted.
@@ -22,6 +39,6 @@ Planning rules:
 
 Tool selection rules:
 - general: rag_retrieval, search_api_if_rag_confidence_low
-- personalized: db_tool
-- calculation: calculator, and include db_tool only when the calculation depends on the user's own account or loan data; otherwise include rag_retrieval if context is needed.
+- personalized: db_tool, and add rag_retrieval/search_api_if_rag_confidence_low when policy/process/fee/explanation context is needed.
+- calculation: calculator, and include db_tool when the calculation depends on the user's own account or loan data; include rag_retrieval/search_api_if_rag_confidence_low when an external formula, policy, fee, or method is needed.
 - escalation: create_escalation

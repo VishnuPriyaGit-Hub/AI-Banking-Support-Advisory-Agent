@@ -109,4 +109,43 @@ def try_structured_calculation(payload: str) -> str:
             indent=2,
         )
 
+    if operation in {"repayment_impact", "extra_payment_tenure_reduction"}:
+        outstanding = float(data["outstanding_balance"])
+        annual_rate = float(data["annual_rate"])
+        current_emi = float(data["current_emi"])
+        extra_monthly_payment = float(data.get("extra_monthly_payment") or data.get("additional_monthly_payment") or 0)
+        current_tenure_months = int(data.get("remaining_tenure_months") or 0)
+        monthly_rate = annual_rate / 12 / 100
+        revised_payment = current_emi + extra_monthly_payment
+        if revised_payment <= 0:
+            raise ValueError("Monthly payment must be greater than zero.")
+
+        def months_to_close(payment: float) -> int:
+            balance = outstanding
+            months = 0
+            while balance > 0 and months < 1200:
+                interest = balance * monthly_rate
+                principal = payment - interest
+                if principal <= 0:
+                    return 1200
+                balance -= principal
+                months += 1
+            return months
+
+        estimated_original_months = current_tenure_months or months_to_close(current_emi)
+        revised_months = months_to_close(revised_payment)
+        months_saved = max(estimated_original_months - revised_months, 0)
+        return json.dumps(
+            {
+                "operation": "extra_payment_tenure_reduction",
+                "current_emi": round(current_emi, 2),
+                "extra_monthly_payment": round(extra_monthly_payment, 2),
+                "revised_monthly_payment": round(revised_payment, 2),
+                "estimated_original_tenure_months": estimated_original_months,
+                "estimated_revised_tenure_months": revised_months,
+                "estimated_months_saved": months_saved,
+            },
+            indent=2,
+        )
+
     return ""

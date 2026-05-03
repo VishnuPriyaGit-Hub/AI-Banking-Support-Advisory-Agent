@@ -115,6 +115,19 @@ class SupabaseTool:
         )
         return {"loans": loans}
 
+    def get_customer_transactions(self, customer_id: str, limit: int = 10) -> dict[str, object]:
+        transactions = self._request(
+            "GET",
+            "transactions",
+            params={
+                "customerid": f"eq.{customer_id}",
+                "select": "transactiondate,transactiontype,amount,merchant,category,balanceafter",
+                "order": "transactiondate.desc",
+                "limit": str(limit),
+            },
+        )
+        return {"transactions": transactions}
+
     def get_branch_customers(self, branch: str) -> list[dict]:
         return self._request(
             "GET",
@@ -213,6 +226,11 @@ class SupabaseTool:
 def get_customer_snapshot_tool(customer_id: str) -> str:
     client = SupabaseTool()
     return json.dumps(client.get_customer_snapshot(customer_id), indent=2)
+
+
+def get_customer_transactions_tool(customer_id: str) -> str:
+    client = SupabaseTool()
+    return json.dumps(client.get_customer_transactions(customer_id), indent=2)
 
 
 def get_branch_customers_tool(branch: str) -> str:

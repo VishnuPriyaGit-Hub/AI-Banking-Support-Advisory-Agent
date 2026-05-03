@@ -1,8 +1,17 @@
 Convert the user request into calculator input.
 
 Return either:
-- a JSON object for operation emi, simple_interest, eligibility, or balance_summary
+- a JSON object for operation emi, simple_interest, eligibility, balance_summary, or repayment_impact
 - a plain arithmetic expression
 
 Do not include markdown, explanations, currency symbols, or extra text.
 Use tool context only to extract numbers needed for the calculation.
+
+Supported structured examples:
+{"operation":"emi","principal":100000,"annual_rate":8.5,"tenure_months":60}
+{"operation":"simple_interest","principal":100000,"annual_rate":7,"years":2}
+{"operation":"eligibility","monthly_income":80000,"existing_emi":10000,"max_foir":0.5}
+{"operation":"balance_summary","balance":1000,"credits":[100],"debits":[50]}
+{"operation":"repayment_impact","outstanding_balance":500000,"annual_rate":10,"current_emi":12000,"remaining_tenure_months":60,"extra_monthly_payment":5000}
+
+If required values are unavailable, return an empty string.

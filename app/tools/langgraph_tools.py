@@ -20,6 +20,12 @@ def supabase_customer_snapshot(customer_id: str) -> str:
 
 
 @tool
+def supabase_customer_transactions(customer_id: str) -> str:
+    """Fetch one customer's recent transactions from Supabase using CustomerID. Does not fetch profile or loan records."""
+    return CLIENT.call_tool("supabase_customer_transactions", customer_id)
+
+
+@tool
 def supabase_branch_customers(branch: str) -> str:
     """Fetch all customers for a branch manager's branch from Supabase using the branch name."""
     return CLIENT.call_tool("supabase_branch_customers", branch)
@@ -88,6 +94,7 @@ def complete_escalation(payload_json: str) -> str:
 PHASE5_TOOLS = [
     calculator,
     supabase_customer_snapshot,
+    supabase_customer_transactions,
     supabase_branch_customers,
     supabase_branch_loan_customers,
     supabase_all_customers,

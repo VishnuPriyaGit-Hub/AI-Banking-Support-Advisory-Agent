@@ -1,1 +1,1 @@
-"""Authentication and database helpers."""
+"""Supabase authentication helpers."""

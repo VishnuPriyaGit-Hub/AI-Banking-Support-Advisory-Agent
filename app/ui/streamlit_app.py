@@ -98,7 +98,6 @@ def submit_sidebar_query(query: str) -> None:
         return
     st.session_state.chat_history.append({"speaker": "user", "text": query})
     st.session_state.pending_user_message = query
-    st.rerun()
 
 
 def render_login() -> None:

@@ -24,7 +24,6 @@ PHASE6_PLANNER_PROMPT_PATH = PHASE6_PROMPT_DIR / "planner_prompt.txt"
 PHASE6_REWRITE_PROMPT_PATH = PHASE6_PROMPT_DIR / "rewrite_query_prompt.txt"
 PHASE6_CALCULATION_PROMPT_PATH = PHASE6_PROMPT_DIR / "calculation_prompt.txt"
 PHASE6_RESPONSE_PROMPT_PATH = PHASE6_PROMPT_DIR / "response_prompt.txt"
-AUTH_DB_PATH = DATA_DIR / "banking_auth.db"
 RAG_SUMMARY_PATH = DATA_DIR / "rag_ingest_summary.json"
 PHASE5_SUPABASE_SCHEMA_PATH = DATA_DIR / "phase5_supabase_schema.sql"
 

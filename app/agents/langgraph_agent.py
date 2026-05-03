@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -22,6 +23,7 @@ from app.core.prompts import (
 )
 from app.mcp.client import LocalMCPClient
 from app.memory.store import ConversationMemory
+from app.observability.tracing import elapsed_ms, flush_langfuse, now_ms, start_span, start_trace
 from app.security.pii import (
     contains_ambiguous_action_request,
     contains_legal_advice_request,
@@ -49,12 +51,20 @@ class BankingState(TypedDict, total=False):
     risk_reason: str
     tool_outputs: dict[str, str]
     confidence_score: float
+    plan_type: str
+    planner_plan: dict[str, Any]
+    data_scope: str
+    entities: dict[str, Any]
+    calculation_task: dict[str, Any]
     final_response: str
     behavior_preferences: str
     adaptation_note: str
     blocked: bool
     escalated_to: str
     logs: list[dict[str, Any]]
+    trace_id: str
+    started_at: str
+    total_latency_ms: int
 
 
 class MultiAgentBankingAssistant:
@@ -97,6 +107,8 @@ class MultiAgentBankingAssistant:
         }
         memory = ConversationMemory(user_jwt=user_jwt)
         memory.prune_inactive(days=60)
+        trace_id = str(uuid.uuid4())
+        run_start_ms = now_ms()
         state: BankingState = {
             "user_query": user_query,
             "user_metadata": metadata,
@@ -105,11 +117,27 @@ class MultiAgentBankingAssistant:
             "logs": [],
             "confidence_score": 0.0,
             "behavior_preferences": redact_text(behavior_preferences or ""),
+            "trace_id": trace_id,
+            "started_at": datetime.now(timezone.utc).isoformat(),
         }
-        if self.graph is not None:
-            final_state = self.graph.invoke(state)
-        else:
-            final_state = self._run_without_langgraph(state)
+        safe_user_id = auth_user_id or customer_id or role
+        with start_trace(
+            name="banking_assistant_run",
+            trace_id=trace_id,
+            user_id=redact_text(str(safe_user_id)),
+            session_id=trace_id,
+            input_payload={"query": redact_text(user_query), "role": role},
+            metadata={"role": role, "customer_profile_present": bool(customer_id), "branch_present": bool(branch)},
+        ) as trace:
+            if self.graph is not None:
+                final_state = self.graph.invoke(state)
+            else:
+                final_state = self._run_without_langgraph(state)
+            final_state["total_latency_ms"] = elapsed_ms(run_start_ms)
+            trace.update(
+                output=self._storage_safe_response(final_state),
+                metadata=self._trace_observability_metadata(final_state),
+            )
 
         memory.save_turn(
             user_id=auth_user_id or customer_id or role,
@@ -120,6 +148,7 @@ class MultiAgentBankingAssistant:
             risk_level=final_state.get("risk_level", "low"),
         )
         self._write_audit_log(final_state)
+        flush_langfuse()
         return {
             "agent": "MultiAgentBankingAssistant",
             "model": self.model_name,
@@ -133,6 +162,8 @@ class MultiAgentBankingAssistant:
             "escalated_to": final_state.get("escalated_to", ""),
             "response": final_state.get("final_response", ""),
             "adaptation_note": final_state.get("adaptation_note", ""),
+            "trace_id": final_state.get("trace_id", trace_id),
+            "total_latency_ms": final_state.get("total_latency_ms", 0),
             "logs": final_state.get("logs", []),
         }
 
@@ -174,85 +205,130 @@ class MultiAgentBankingAssistant:
         return self.response_generation_agent(state)
 
     def planner_agent(self, state: BankingState) -> BankingState:
+        start_ms = now_ms()
         query = state["user_query"]
         metadata = state.get("user_metadata", {})
-        history = state.get("chat_history", [])
-        deterministic_route = self._classify_route(query, history)
-        llm_plan = self._llm_planner_decision(query, history, metadata)
-        route = self._validated_planner_route(deterministic_route, llm_plan.get("route"), query, history)
-        standalone_query = self._rewrite_query(query, state.get("chat_history", []), metadata)
-        required_tools = self._select_tools(route, query)
-        state.update({"standalone_query": standalone_query, "route": route, "required_tools": required_tools})
-        self._add_step_log(
-            state,
-            "planner",
-            route=route,
-            tools=required_tools,
-            planner_mode="llm_validated" if llm_plan else "deterministic",
-            planner_reason=redact_text(str(llm_plan.get("reason", "")))[:240] if llm_plan else "",
-            confidence_score=float(llm_plan.get("confidence", state.get("confidence_score", 0.0)) or 0.0) if llm_plan else state.get("confidence_score", 0.0),
-        )
+        with start_span("planner_agent", input_payload={"query": redact_text(query)}, metadata={"trace_id": state.get("trace_id", "")}) as span:
+            history = state.get("chat_history", [])
+            deterministic_route = self._classify_route(query, history)
+            llm_plan = self._llm_planner_decision(query, history, metadata)
+            route = self._validated_planner_route(deterministic_route, llm_plan.get("route"), query, history)
+            plan_type = self._infer_plan_type(query, history, llm_plan)
+            if deterministic_route != "escalation":
+                route = self._align_route_with_plan(route, plan_type, llm_plan)
+            standalone_query = self._rewrite_query(query, state.get("chat_history", []), metadata)
+            required_tools = self._select_tools(route, query, plan_type, llm_plan.get("required_tools", []))
+            data_scope = self._resolve_data_scope(route, metadata.get("role", ""), llm_plan.get("data_scope", "none"), required_tools)
+            entities = llm_plan.get("entities", {}) if isinstance(llm_plan.get("entities"), dict) else {}
+            calculation_task = llm_plan.get("calculation_task", {}) if isinstance(llm_plan.get("calculation_task"), dict) else {}
+            state.update(
+                {
+                    "standalone_query": standalone_query,
+                    "route": route,
+                    "required_tools": required_tools,
+                    "plan_type": plan_type,
+                    "planner_plan": redact_value(llm_plan),
+                    "data_scope": data_scope,
+                    "entities": redact_mapping(entities),
+                    "calculation_task": redact_value(calculation_task),
+                }
+            )
+            metadata_out = {
+                "route": route,
+                "data_scope": data_scope,
+                "tools": required_tools,
+                "planner_mode": "llm_validated" if llm_plan else "deterministic",
+                "latency_ms": elapsed_ms(start_ms),
+            }
+            span.update(output={"route": route, "tools": required_tools}, metadata=metadata_out)
+            self._add_step_log(
+                state,
+                "planner",
+                status="success",
+                route=route,
+                plan_type=plan_type,
+                data_scope=data_scope,
+                tools=required_tools,
+                planner_mode=metadata_out["planner_mode"],
+                planner_reason=redact_text(str(llm_plan.get("reason", "")))[:240] if llm_plan else "",
+                confidence_score=float(llm_plan.get("confidence", state.get("confidence_score", 0.0)) or 0.0) if llm_plan else state.get("confidence_score", 0.0),
+                latency_ms=metadata_out["latency_ms"],
+            )
         return state
 
     def risk_agent(self, state: BankingState) -> BankingState:
-        risk_level, reason = self._classify_risk(state)
-        state["risk_level"] = risk_level
-        state["risk_reason"] = reason
-        already_escalated = bool(state.get("escalated_to"))
-        if risk_level == "medium" and not already_escalated:
-            state["escalated_to"] = "branch_manager"
-            state.setdefault("tool_outputs", {})["create_escalation"] = self._create_escalation(state)
-        elif risk_level == "high" and not already_escalated:
-            state["blocked"] = True
-            state["escalated_to"] = "risk_team"
-            state.setdefault("tool_outputs", {})["create_escalation"] = self._create_escalation(state)
-        elif risk_level == "high":
-            state["blocked"] = True
-        self._add_step_log(state, "risk_compliance", risk_level=risk_level, reason=reason)
+        start_ms = now_ms()
+        with start_span("risk_compliance", metadata={"trace_id": state.get("trace_id", "")}) as span:
+            risk_level, reason = self._classify_risk(state)
+            state["risk_level"] = risk_level
+            state["risk_reason"] = reason
+            already_escalated = bool(state.get("escalated_to"))
+            if risk_level == "medium" and not already_escalated:
+                state["escalated_to"] = "branch_manager"
+                state.setdefault("tool_outputs", {})["create_escalation"] = self._create_escalation(state)
+            elif risk_level == "high" and not already_escalated:
+                state["blocked"] = True
+                state["escalated_to"] = "risk_team"
+                state.setdefault("tool_outputs", {})["create_escalation"] = self._create_escalation(state)
+            elif risk_level == "high":
+                state["blocked"] = True
+            latency = elapsed_ms(start_ms)
+            span.update(output={"risk_level": risk_level}, metadata={"risk_level": risk_level, "reason": reason, "latency_ms": latency})
+            self._add_step_log(state, "risk_compliance", status="success", risk_level=risk_level, reason=reason, latency_ms=latency)
         return state
 
     def mcp_tool_node(self, state: BankingState) -> BankingState:
+        start_ms = now_ms()
         outputs = dict(state.get("tool_outputs", {}))
         route = state.get("route", "general")
         query = state.get("standalone_query") or state["user_query"]
-        if route == "general":
-            rag_output = self._safe_tool_call("rag_retrieval", query)
-            outputs["rag_retrieval"] = rag_output
-            confidence = self._extract_confidence(rag_output)
-            state["confidence_score"] = confidence
-            if confidence <= 0.75:
-                outputs["search_api"] = self._safe_tool_call("search_api", query)
-        elif route == "personalized":
-            outputs["db_tool"] = self._fetch_personalized_data(state)
-            state["confidence_score"] = 1.0 if self._db_tool_succeeded(outputs["db_tool"]) else 0.0
-            if self._is_personalized_guidance_query(state):
-                rag_query = self._build_guidance_query(state, outputs["db_tool"])
-                outputs["rag_retrieval"] = self._safe_tool_call("rag_retrieval", rag_query)
-                rag_confidence = self._extract_confidence(outputs["rag_retrieval"])
-                state["confidence_score"] = max(float(state.get("confidence_score", 0.0) or 0.0), rag_confidence)
-                if rag_confidence <= 0.75:
-                    outputs["search_api"] = self._safe_tool_call("search_api", rag_query)
-        elif route == "calculation":
-            context = self._fetch_calculation_context(state)
-            outputs.update(context)
-            outputs["calculator"] = self._safe_tool_call("calculator", self._build_calculation_payload(state, context))
-        elif route == "escalation":
-            outputs["create_escalation"] = self._create_escalation(state)
-        state["tool_outputs"] = outputs
-        for tool_name in outputs:
-            self._add_step_log(state, "mcp_tool_call", tool_used=tool_name, confidence_score=state.get("confidence_score", 0.0))
+        required_tools = set(state.get("required_tools", []))
+        with start_span("mcp_tool_node", metadata={"trace_id": state.get("trace_id", ""), "route": route}) as span:
+            if route == "general":
+                rag_output = self._safe_tool_call("rag_retrieval", query, state=state)
+                outputs["rag_retrieval"] = rag_output
+                confidence = self._extract_confidence(rag_output)
+                state["confidence_score"] = confidence
+                if "search_api" in required_tools or ("search_api_if_rag_confidence_low" in required_tools and confidence <= 0.75):
+                    outputs["search_api"] = self._safe_tool_call("search_api", query, state=state)
+            elif route == "personalized":
+                outputs["db_tool"] = self._fetch_personalized_data(state)
+                state["confidence_score"] = 1.0 if self._db_tool_succeeded(outputs["db_tool"]) else 0.0
+                if "rag_retrieval" in required_tools or "search_api" in required_tools or "search_api_if_rag_confidence_low" in required_tools:
+                    rag_query = self._build_guidance_query(state, outputs["db_tool"])
+                    outputs["rag_retrieval"] = self._safe_tool_call("rag_retrieval", rag_query, state=state)
+                    rag_confidence = self._extract_confidence(outputs["rag_retrieval"])
+                    state["confidence_score"] = max(float(state.get("confidence_score", 0.0) or 0.0), rag_confidence)
+                    if "search_api" in required_tools or ("search_api_if_rag_confidence_low" in required_tools and rag_confidence <= 0.75):
+                        outputs["search_api"] = self._safe_tool_call("search_api", rag_query, state=state)
+            elif route == "calculation":
+                context = self._fetch_calculation_context(state)
+                outputs.update(context)
+                outputs["calculator"] = self._safe_tool_call("calculator", self._build_calculation_payload(state, context), state=state)
+            elif route == "escalation":
+                outputs["create_escalation"] = self._create_escalation(state)
+            state["tool_outputs"] = outputs
+            span.update(
+                output={"tools_used": list(outputs.keys())},
+                metadata={"tools_used": list(outputs.keys()), "confidence_score": state.get("confidence_score", 0.0), "latency_ms": elapsed_ms(start_ms)},
+            )
         return state
 
     def response_generation_agent(self, state: BankingState) -> BankingState:
-        if state.get("blocked"):
-            response = self._blocked_response(state)
-        elif state.get("risk_level") == "medium":
-            response = "I have escalated this request to your branch manager. They will review it and follow up with you."
-        else:
-            response = self._generate_response(state)
-        state["final_response"] = response
-        state["adaptation_note"] = self._adaptation_note(state)
-        self._add_step_log(state, "response_generation", final_response=self._storage_safe_response(state))
+        start_ms = now_ms()
+        with start_span("response_generation", metadata={"trace_id": state.get("trace_id", ""), "route": state.get("route", "")}) as span:
+            if state.get("blocked"):
+                response = self._blocked_response(state)
+            elif state.get("risk_level") == "medium":
+                response = "I have escalated this request to your branch manager. They will review it and follow up with you."
+            else:
+                response = self._generate_response(state)
+            state["final_response"] = response
+            state["adaptation_note"] = self._adaptation_note(state)
+            safe_response = self._storage_safe_response(state)
+            latency = elapsed_ms(start_ms)
+            span.update(output=safe_response, metadata={"latency_ms": latency, "confidence_score": state.get("confidence_score", 0.0)})
+            self._add_step_log(state, "response_generation", status="success", final_response=safe_response, latency_ms=latency)
         return state
 
     def _after_risk(self, state: BankingState) -> str:
@@ -310,6 +386,7 @@ class MultiAgentBankingAssistant:
             "rag_retrieval",
             "db_tool",
             "calculator",
+            "search_api",
             "search_api_if_rag_confidence_low",
             "create_escalation",
         }
@@ -318,9 +395,26 @@ class MultiAgentBankingAssistant:
             confidence_value = max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):
             confidence_value = 0.0
+        plan_type = str(payload.get("plan_type", "default")).strip().lower()
+        if plan_type not in {"default", "data_lookup", "personalized_guidance", "calculation"}:
+            plan_type = "default"
+        data_scope = str(payload.get("data_scope", "none")).strip().lower()
+        allowed_scopes = {"none", "customer_snapshot", "customer_loans", "customer_transactions", "branch_customers", "branch_loan_customers", "all_customers"}
+        if data_scope not in allowed_scopes:
+            data_scope = "none"
+        entities = payload.get("entities", {})
+        if not isinstance(entities, dict):
+            entities = {}
+        calculation_task = payload.get("calculation_task", {})
+        if not isinstance(calculation_task, dict):
+            calculation_task = {}
         return {
             "route": route,
+            "plan_type": plan_type,
             "required_tools": [str(tool) for tool in tools if str(tool) in allowed_tools],
+            "data_scope": data_scope,
+            "entities": redact_mapping(entities),
+            "calculation_task": redact_value(calculation_task),
             "reason": redact_text(str(payload.get("reason", ""))),
             "confidence": confidence_value,
         }
@@ -332,23 +426,75 @@ class MultiAgentBankingAssistant:
         query: str,
         history: list[dict[str, str]],
     ) -> Route:
-        if deterministic_route in {"escalation", "personalized", "calculation"}:
+        if deterministic_route == "escalation":
             return deterministic_route
         if not isinstance(llm_route, str) or llm_route not in {"general", "personalized", "calculation", "escalation"}:
             return deterministic_route
-        if llm_route == "calculation" and not re.search(r"\d", query):
-            return "general"
-        if llm_route == "personalized":
-            q = query.lower()
-            if any(token in q for token in ["my", "customer", "account", "loan", "transaction", "branch"]):
-                return "personalized"
-            if self._history_mentions_loan(history):
-                return "personalized"
-            return "general"
         return llm_route
+
+    def _infer_plan_type(self, query: str, history: list[dict[str, str]], llm_plan: dict[str, Any]) -> str:
+        llm_plan_type = str(llm_plan.get("plan_type", "")).strip().lower()
+        if llm_plan_type in {"default", "data_lookup", "personalized_guidance", "calculation"}:
+            return llm_plan_type
+        tools = set(llm_plan.get("required_tools", [])) if isinstance(llm_plan.get("required_tools"), list) else set()
+        if llm_plan:
+            if "calculator" in tools:
+                return "calculation"
+            if "db_tool" in tools and ({"rag_retrieval", "search_api", "search_api_if_rag_confidence_low"} & tools):
+                return "personalized_guidance"
+            if "db_tool" in tools:
+                return "data_lookup"
+            return "default"
+        q = query.lower()
+        if "calculator" in tools:
+            return "calculation"
+        if any(word in q for word in ["calculate", "estimate", "impact", "reduce", "saves", "saving", "eligibility", "maturity"]) and re.search(r"\d", q):
+            return "calculation"
+        if "db_tool" in tools and ("rag_retrieval" in tools or "search_api_if_rag_confidence_low" in tools):
+            return "personalized_guidance"
+        if any(word in q for word in ["explain", "tell me", "how", "what", "option", "policy", "process", "charge", "fee"]) and (
+            "loan" in q or self._history_mentions_loan(history)
+        ):
+            return "personalized_guidance"
+        if "db_tool" in tools:
+            return "data_lookup"
+        return "default"
+
+    def _align_route_with_plan(self, route: Route, plan_type: str, llm_plan: dict[str, Any]) -> Route:
+        if not llm_plan:
+            return route
+        if plan_type == "calculation":
+            return "calculation"
+        if plan_type in {"personalized_guidance", "data_lookup"}:
+            return "personalized"
+        return route
+
+    def _resolve_data_scope(self, route: Route, role: str, requested_scope: Any, required_tools: list[str] | None = None) -> str:
+        scope = str(requested_scope or "none").strip().lower()
+        if "db_tool" not in set(required_tools or self._route_tool_floor(route)):
+            return "none"
+        customer_scopes = {"customer_snapshot", "customer_loans", "customer_transactions"}
+        manager_scopes = {"branch_customers", "branch_loan_customers"}
+        staff_scopes = {"customer_snapshot", "all_customers"}
+        if role == "customer":
+            return scope if scope in customer_scopes else "customer_snapshot"
+        if role == "manager":
+            return scope if scope in manager_scopes else "branch_customers"
+        if role in {"admin", "support", "risk"}:
+            return scope if scope in staff_scopes else "all_customers"
+        return "none"
+
+    def _route_tool_floor(self, route: Route) -> list[str]:
+        return {
+            "general": ["rag_retrieval"],
+            "personalized": ["db_tool"],
+            "calculation": ["calculator"],
+            "escalation": ["create_escalation"],
+        }.get(route, [])
 
     def _classify_route(self, query: str, chat_history: list[dict[str, str]] | None = None) -> Route:
         q = query.lower()
+        # Minimal non-LLM fallback and safety pre-route. Normal planning is LLM-first.
         if any(
             token in q
             for token in [
@@ -366,72 +512,56 @@ class MultiAgentBankingAssistant:
             ]
         ):
             return "escalation"
-        has_number = bool(re.search(r"\d", q))
-        if (
-            "calculate" in q
-            or "eligibility" in q
-            or "maturity" in q
-            or "balance summary" in q
-            or ("emi" in q and has_number)
-            or ("interest" in q and has_number)
-        ):
+        if bool(re.search(r"\d", q)) and any(token in q for token in ["calculate", "estimate", "emi", "interest", "eligibility", "maturity"]):
             return "calculation"
-        personalized_tokens = [
-            "my balance",
-            "my account",
-            "my loan",
-            "i have a loan",
-            "i have a home loan",
-            "repayment options",
-            "my repayment",
-            "my transaction",
-            "transactions",
-            "account balance",
-            "in my branch",
-            "my branch",
-            "branch customers",
-            "who all",
-            "who have",
-            "opted for loan",
-            "taken loan",
-            "loan customers",
-            "customer details",
-            "show customer",
-            "customer id",
-            "customer profile",
-        ]
-        loan_follow_up_tokens = [
-            "pay extra",
-            "extra payment",
-            "extra every month",
-            "prepay",
-            "prepayment",
-            "part payment",
-            "part-payment",
-            "foreclose",
-            "foreclosure",
-            "reduce tenure",
-            "reduce emi",
-        ]
-        if any(token in q for token in loan_follow_up_tokens) and self._history_mentions_loan(chat_history):
-            return "personalized"
-        if any(token in q for token in personalized_tokens):
+        if self._needs_personal_context(q) or self._history_mentions_loan(chat_history):
             return "personalized"
         return "general"
 
-    def _select_tools(self, route: Route, query: str) -> list[str]:
+    def _select_tools(self, route: Route, query: str, plan_type: str = "default", llm_tools: list[Any] | None = None) -> list[str]:
+        selected = self._sanitize_planner_tools(llm_tools or [])
+        if selected:
+            return self._enforce_required_tool_floor(route, plan_type, selected)
         if route == "general":
             return ["rag_retrieval", "search_api_if_rag_confidence_low"]
         if route == "personalized":
+            if plan_type == "personalized_guidance":
+                return ["db_tool", "rag_retrieval", "search_api_if_rag_confidence_low"]
             return ["db_tool"]
         if route == "calculation":
-            tools = ["calculator"]
-            if any(token in query.lower() for token in ["my", "balance", "my loan", "my emi", "transaction"]):
-                tools.insert(0, "db_tool")
-            else:
-                tools.insert(0, "rag_retrieval")
-            return tools
+            if plan_type == "calculation" and self._needs_personal_context(query):
+                return ["db_tool", "rag_retrieval", "search_api", "calculator"]
+            return ["rag_retrieval", "calculator"]
         return ["create_escalation"]
+
+    def _sanitize_planner_tools(self, tools: list[Any]) -> list[str]:
+        allowed = {
+            "rag_retrieval",
+            "db_tool",
+            "calculator",
+            "search_api",
+            "search_api_if_rag_confidence_low",
+            "create_escalation",
+        }
+        selected: list[str] = []
+        for tool in tools:
+            name = str(tool).strip()
+            if name in allowed and name not in selected:
+                selected.append(name)
+        return selected
+
+    def _enforce_required_tool_floor(self, route: Route, plan_type: str, tools: list[str]) -> list[str]:
+        selected = list(tools)
+        for tool in self._route_tool_floor(route):
+            if tool not in selected:
+                selected.insert(0, tool)
+        if plan_type == "personalized_guidance":
+            for tool in ["db_tool", "rag_retrieval"]:
+                if tool not in selected:
+                    selected.append(tool)
+        if plan_type == "calculation" and "calculator" not in selected:
+            selected.append("calculator")
+        return selected
 
     def _classify_risk(self, state: BankingState) -> tuple[RiskLevel, str]:
         query = state["user_query"].lower()
@@ -476,41 +606,81 @@ class MultiAgentBankingAssistant:
         metadata = state.get("user_metadata", {})
         role = metadata.get("role", "")
         jwt = metadata.get("user_jwt") or None
-        try:
-            client = SupabaseTool(user_jwt=jwt)
-            if role == "customer":
-                query = state.get("user_query", "").lower()
-                if "loan" in query and not any(token in query for token in ["balance", "transaction", "statement"]):
-                    return json.dumps(client.get_customer_loans(metadata.get("customer_id", "")), indent=2)
-                return json.dumps(client.get_customer_snapshot(metadata.get("customer_id", "")), indent=2)
-            if role == "manager":
-                query = state.get("user_query", "").lower()
-                if any(token in query for token in ["loan", "who all", "who have", "opted", "taken"]):
-                    return json.dumps(client.get_branch_loan_customers(metadata.get("branch", "")), indent=2)
-                return json.dumps(client.get_branch_customers(metadata.get("branch", "")), indent=2)
-            if role in {"admin", "support", "risk"}:
-                requested_customer_id = self._extract_customer_id(state.get("user_query", ""))
-                if requested_customer_id:
-                    return json.dumps(client.get_customer_snapshot(requested_customer_id), indent=2)
-                return json.dumps(client.get_all_customers(), indent=2)
-            return "DB access denied for this role."
-        except Exception as exc:
-            return f"DB tool failed: {exc}"
+        start_ms = now_ms()
+        with start_span("db_tool", input_payload={"role": role, "query": redact_text(state.get("user_query", ""))}, metadata={"trace_id": state.get("trace_id", "")}) as span:
+            try:
+                client = SupabaseTool(user_jwt=jwt)
+                data_scope = state.get("data_scope") or self._resolve_data_scope(state.get("route", "personalized"), role, "none", state.get("required_tools", []))
+                if role == "customer":
+                    if data_scope == "customer_loans":
+                        result = json.dumps(client.get_customer_loans(metadata.get("customer_id", "")), indent=2)
+                    elif data_scope == "customer_transactions":
+                        result = json.dumps(client.get_customer_transactions(metadata.get("customer_id", "")), indent=2)
+                    else:
+                        result = json.dumps(client.get_customer_snapshot(metadata.get("customer_id", "")), indent=2)
+                elif role == "manager":
+                    if data_scope == "branch_loan_customers":
+                        result = json.dumps(client.get_branch_loan_customers(metadata.get("branch", "")), indent=2)
+                    else:
+                        result = json.dumps(client.get_branch_customers(metadata.get("branch", "")), indent=2)
+                elif role in {"admin", "support", "risk"}:
+                    requested_customer_id = self._target_customer_id(state)
+                    if data_scope == "customer_snapshot" and requested_customer_id:
+                        result = json.dumps(client.get_customer_snapshot(requested_customer_id), indent=2)
+                    else:
+                        result = json.dumps(client.get_all_customers(), indent=2)
+                else:
+                    result = "DB access denied for this role."
+                latency = elapsed_ms(start_ms)
+                success = not result.lower().startswith("db tool failed")
+                span.update(output="[REDACTED_PERSONALIZED_DB_CONTEXT]", metadata={"status": "success" if success else "error", "latency_ms": latency})
+                self._add_step_log(state, "mcp_tool_call", status="success" if success else "error", tool_used="db_tool", latency_ms=latency, confidence_score=state.get("confidence_score", 0.0))
+                return result
+            except Exception as exc:
+                latency = elapsed_ms(start_ms)
+                error_text = f"DB tool failed: {exc}"
+                span.update(output="[REDACTED_PERSONALIZED_DB_CONTEXT]", metadata={"status": "error", "latency_ms": latency, "error_type": type(exc).__name__}, error=redact_text(error_text))
+                self._add_step_log(state, "mcp_tool_call", status="error", tool_used="db_tool", latency_ms=latency, error_type=type(exc).__name__, error=redact_text(error_text))
+                return error_text
 
     def _fetch_calculation_context(self, state: BankingState) -> dict[str, str]:
-        query = state["user_query"].lower()
-        if any(token in query for token in ["my", "balance", "loan", "transaction"]):
-            return {"db_tool": self._fetch_personalized_data(state)}
-        return {"rag_retrieval": self._safe_tool_call("rag_retrieval", state.get("standalone_query") or state["user_query"])}
+        required_tools = set(state.get("required_tools", []))
+        if "db_tool" in required_tools:
+            context = {"db_tool": self._fetch_personalized_data(state)}
+            if "rag_retrieval" in required_tools or "search_api" in required_tools or "search_api_if_rag_confidence_low" in required_tools:
+                guidance_query = self._build_guidance_query(state, context["db_tool"])
+                context["rag_retrieval"] = self._safe_tool_call("rag_retrieval", guidance_query, state=state)
+            rag_confidence = self._extract_confidence(context.get("rag_retrieval", "{}"))
+            if "search_api" in required_tools or ("search_api_if_rag_confidence_low" in required_tools and rag_confidence <= 0.75):
+                context["search_api"] = self._safe_tool_call("search_api", f"{guidance_query} calculation method formula", state=state)
+            return context
+        if "rag_retrieval" in required_tools:
+            return {"rag_retrieval": self._safe_tool_call("rag_retrieval", state.get("standalone_query") or state["user_query"], state=state)}
+        return {}
+
+    def _target_customer_id(self, state: BankingState) -> str:
+        entities = state.get("entities", {})
+        if isinstance(entities, dict):
+            for key in ["customer_id", "customerid"]:
+                value = str(entities.get(key, "")).strip()
+                if value:
+                    return value
+        return self._extract_customer_id(state.get("user_query", ""))
 
     def _build_calculation_payload(self, state: BankingState, context: dict[str, str]) -> str:
         query = state["user_query"]
+        task_payload = self._build_payload_from_calculation_task(state)
+        if task_payload and "db_tool" not in context:
+            return task_payload
         emi_match = re.search(r"(\d[\d,]*)\D+(\d+(?:\.\d+)?)\s*%?\D+(\d+)\s*(year|years|month|months)", query.lower())
         if "emi" in query.lower() and emi_match:
             principal = float(emi_match.group(1).replace(",", ""))
             rate = float(emi_match.group(2))
             tenure = int(emi_match.group(3)) * (12 if emi_match.group(4).startswith("year") else 1)
             return json.dumps({"operation": "emi", "principal": principal, "annual_rate": rate, "tenure_months": tenure})
+        structured_payload = self._build_structured_customer_calculation_payload(state, context)
+        if structured_payload:
+            return structured_payload
         if self.llm:
             prompt = (
                 f"{self.calculation_prompt}\n\n"
@@ -525,6 +695,124 @@ class MultiAgentBankingAssistant:
                 pass
         return self._extract_expression(query) or "0"
 
+    def _build_payload_from_calculation_task(self, state: BankingState) -> str:
+        task = state.get("calculation_task", {})
+        if not isinstance(task, dict):
+            return ""
+        operation = str(task.get("operation", "")).strip().lower()
+        inputs = task.get("inputs", {})
+        if not isinstance(inputs, dict) or operation in {"", "none"}:
+            return ""
+        if operation == "emi":
+            principal = self._input_number(inputs, "principal", "loan_amount", "amount")
+            annual_rate = self._input_number(inputs, "annual_rate", "interest_rate", "rate")
+            tenure_months = self._input_number(inputs, "tenure_months", "tenure")
+            tenure_years = self._input_number(inputs, "tenure_years", "years")
+            if tenure_months is None and tenure_years is not None:
+                tenure_months = tenure_years * 12
+            if principal is not None and annual_rate is not None and tenure_months is not None:
+                return json.dumps(
+                    {
+                        "operation": "emi",
+                        "principal": principal,
+                        "annual_rate": annual_rate,
+                        "tenure_months": int(tenure_months),
+                    }
+                )
+        if operation == "simple_interest":
+            principal = self._input_number(inputs, "principal", "amount")
+            annual_rate = self._input_number(inputs, "annual_rate", "interest_rate", "rate")
+            years = self._input_number(inputs, "years", "tenure_years")
+            if principal is not None and annual_rate is not None and years is not None:
+                return json.dumps({"operation": "simple_interest", "principal": principal, "annual_rate": annual_rate, "years": years})
+        return ""
+
+    def _build_structured_customer_calculation_payload(self, state: BankingState, context: dict[str, str]) -> str:
+        if state.get("plan_type") != "calculation" or "db_tool" not in context:
+            return ""
+        loans = self._extract_safe_loans(str(context.get("db_tool", "")))
+        task = state.get("calculation_task", {})
+        inputs = task.get("inputs", {}) if isinstance(task, dict) and isinstance(task.get("inputs"), dict) else {}
+        amount = self._input_number(inputs, "extra_monthly_payment", "additional_monthly_payment", "prepayment_amount")
+        if amount is None:
+            amount = self._extract_first_amount(state.get("user_query", ""))
+        if not loans or amount is None:
+            return ""
+        loan = self._select_relevant_loan(state.get("user_query", ""), loans, state.get("entities", {}))
+        if not loan:
+            return ""
+        outstanding = self._number_from_record(loan, "outstandingbalance", "outstanding_balance")
+        annual_rate = self._number_from_record(loan, "interestrate", "interest_rate", "annual_rate")
+        current_emi = self._number_from_record(loan, "emi", "current_emi")
+        tenure_months = self._number_from_record(loan, "tenuremonths", "tenure_months", "remaining_tenure_months")
+        if outstanding is None or annual_rate is None or current_emi is None:
+            return ""
+        return json.dumps(
+            {
+                "operation": "repayment_impact",
+                "outstanding_balance": outstanding,
+                "annual_rate": annual_rate,
+                "current_emi": current_emi,
+                "remaining_tenure_months": int(tenure_months or 0),
+                "extra_monthly_payment": amount,
+            }
+        )
+
+    def _input_number(self, payload: dict[str, Any], *keys: str) -> float | None:
+        for key in keys:
+            value = payload.get(key)
+            if value in {None, ""}:
+                continue
+            try:
+                return self._normalize_amount(str(value))
+            except ValueError:
+                continue
+        return None
+
+    def _extract_first_amount(self, text: str) -> float | None:
+        matches = re.findall(r"(?:rs\.?|inr|₹)?\s*(\d[\d,]*(?:\.\d+)?)", text.lower())
+        for raw in matches:
+            value = self._normalize_amount(raw)
+            if value > 0:
+                return value
+        return None
+
+    def _normalize_amount(self, raw: str) -> float:
+        text = raw.strip()
+        if "," not in text:
+            return float(text)
+        groups = text.split(",")
+        if len(groups) == 2 and len(groups[1]) == 2:
+            return float(f"{groups[0]}{groups[1]}0")
+        return float(text.replace(",", ""))
+
+    def _select_relevant_loan(self, query: str, loans: list[dict[str, object]], entities: dict[str, Any] | None = None) -> dict[str, object] | None:
+        entity_text = ""
+        if isinstance(entities, dict):
+            entity_text = str(entities.get("loan_type", "")).lower()
+        query_tokens = set(re.findall(r"[a-z]+", f"{entity_text} {query}".lower()))
+        best: dict[str, object] | None = None
+        best_score = -1
+        for loan in loans:
+            loan_type = str(loan.get("loantype") or loan.get("loan_type") or "").lower()
+            loan_tokens = set(re.findall(r"[a-z]+", loan_type))
+            score = len(query_tokens & loan_tokens)
+            if score > best_score:
+                best = loan
+                best_score = score
+        return best or (loans[0] if loans else None)
+
+    def _number_from_record(self, record: dict[str, object], *keys: str) -> float | None:
+        for key in keys:
+            value = record.get(key)
+            if value in {None, ""}:
+                continue
+            try:
+                return float(str(value).replace(",", ""))
+            except ValueError:
+                continue
+        return None
+
     def _redact_tool_context_for_llm(self, context: dict[str, str]) -> dict[str, str]:
         redacted: dict[str, str] = {}
         for key, value in context.items():
@@ -534,13 +822,31 @@ class MultiAgentBankingAssistant:
                 redacted[key] = redact_json_text(str(value))
         return redacted
 
+    def _needs_personal_context(self, text: str) -> bool:
+        q = text.lower()
+        return any(word in q for word in ["my", "mine", "account", "loan", "transaction"])
+
+    def _extract_safe_loans(self, db_output: str) -> list[dict[str, object]]:
+        try:
+            payload = json.loads(db_output)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(payload, dict) and isinstance(payload.get("loans"), list):
+            return [loan for loan in payload["loans"] if isinstance(loan, dict)]
+        if isinstance(payload, list):
+            return [loan for loan in payload if isinstance(loan, dict)]
+        return []
+
     def _generate_response(self, state: BankingState) -> str:
-        if "db_tool" in state.get("tool_outputs", {}):
-            if self._is_personalized_guidance_query(state):
-                return self._build_personalized_guidance_response(state)
-            return self._build_db_response(state)
         if "calculator" in state.get("tool_outputs", {}):
             return self._fallback_response(state)
+        if "db_tool" in state.get("tool_outputs", {}):
+            if self._has_guidance_context(state):
+                return self._build_personalized_guidance_response(state)
+            semantic_response = self._build_semantic_db_response(state)
+            if semantic_response:
+                return semantic_response
+            return self._build_db_response(state)
         if not self.llm:
             return self._fallback_response(state)
         prompt = (
@@ -577,11 +883,20 @@ class MultiAgentBankingAssistant:
                         f"The estimated interest is {payload.get('interest')}. "
                         f"The maturity amount is {payload.get('maturity_amount')}."
                     )
+                if payload.get("operation") == "extra_payment_tenure_reduction":
+                    return (
+                        "Based on your current loan figures, paying an extra "
+                        f"Rs. {float(payload.get('extra_monthly_payment', 0)):,.2f} each month would make your estimated monthly outflow "
+                        f"Rs. {float(payload.get('revised_monthly_payment', 0)):,.2f}. "
+                        f"The estimated remaining tenure may reduce from {payload.get('estimated_original_tenure_months')} months "
+                        f"to about {payload.get('estimated_revised_tenure_months')} months, saving around "
+                        f"{payload.get('estimated_months_saved')} months. This is an estimate; actual savings can change based on bank policy, charges, and how the prepayment is applied."
+                    )
             except Exception:
                 pass
             return f"Here is the calculated result: {outputs['calculator']}"
         if "db_tool" in outputs:
-            if self._is_personalized_guidance_query(state):
+            if self._has_guidance_context(state):
                 return self._build_personalized_guidance_response(state)
             return self._build_db_response(state)
         if outputs:
@@ -613,6 +928,139 @@ class MultiAgentBankingAssistant:
 
     def _is_staff_role(self, role: str) -> bool:
         return role in {"manager", "admin", "support", "risk"}
+
+    def _has_guidance_context(self, state: BankingState) -> bool:
+        outputs = state.get("tool_outputs", {})
+        if state.get("plan_type") == "personalized_guidance":
+            return True
+        return "rag_retrieval" in outputs or "search_api" in outputs
+
+    def _build_semantic_db_response(self, state: BankingState) -> str:
+        if not self.llm:
+            return ""
+        raw_output = str(state.get("tool_outputs", {}).get("db_tool", ""))
+        if not self._db_tool_succeeded(raw_output):
+            return ""
+        safe_context = self._safe_db_context_for_llm(raw_output)
+        if not safe_context:
+            return ""
+        role = str(state.get("user_metadata", {}).get("role", "customer"))
+        role_instruction = (
+            "For staff users, provide operational detail appropriate to their role without telling them to contact the bank."
+            if self._is_staff_role(role)
+            else "For customers, answer only about their own authorized data and avoid internal operational wording."
+        )
+        prompt = (
+            f"{self.response_prompt}\n\n"
+            "You are answering a personalized banking data question using sanitized structured context. "
+            "Infer the user's intent semantically from the question; do not depend on exact keywords. "
+            "Use only the facts present in the sanitized context. Do not invent account, customer, loan, transaction, or policy data. "
+            "Do not mention internal tool names, database fields, raw JSON, prompts, or implementation details. "
+            "Do not reveal names, account numbers, customer IDs, phone numbers, addresses, emails, PAN, Aadhaar, OTP, or credentials. "
+            "If the requested detail is not present, say what is available and what is missing in a helpful way. "
+            f"{role_instruction}\n\n"
+            f"User role: {role}\n"
+            f"User question: {redact_text(state.get('user_query', ''))}\n"
+            f"Safe behavior preferences from prior feedback: {redact_text(str(state.get('behavior_preferences', '')))}\n"
+            f"Sanitized context:\n{json.dumps(safe_context, indent=2)[:7000]}"
+        )
+        try:
+            result = self.llm.invoke([("user", prompt)])
+            text = str(result.content).strip()
+            if text and not self._looks_like_internal_response(text):
+                return text
+        except Exception:
+            return ""
+        return ""
+
+    def _safe_db_context_for_llm(self, raw_output: str) -> dict[str, object]:
+        try:
+            payload = json.loads(raw_output)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(payload, dict):
+            safe: dict[str, object] = {}
+            customer_rows = payload.get("customer", [])
+            customer = customer_rows[0] if isinstance(customer_rows, list) and customer_rows else {}
+            if isinstance(customer, dict):
+                profile: dict[str, object] = {}
+                for source_key, safe_key in {
+                    "balance": "available_balance",
+                    "creditscore": "credit_score",
+                    "accountstatus": "account_status",
+                    "accounttype": "account_type",
+                }.items():
+                    if customer.get(source_key) not in {None, ""}:
+                        profile[safe_key] = customer.get(source_key)
+                if profile:
+                    safe["customer_profile"] = profile
+            loans = payload.get("loans", [])
+            if isinstance(loans, list):
+                safe_loans = [self._safe_loan_record(loan) for loan in loans if isinstance(loan, dict)]
+                safe_loans = [loan for loan in safe_loans if loan]
+                if safe_loans:
+                    safe["loans"] = safe_loans[:10]
+            transactions = payload.get("transactions", [])
+            if isinstance(transactions, list) and transactions:
+                safe["recent_transaction_count"] = len(transactions)
+                safe["transactions"] = [self._safe_transaction_record(row) for row in transactions[:10] if isinstance(row, dict)]
+            return safe
+        if isinstance(payload, list):
+            safe_records: list[dict[str, object]] = []
+            for row in payload[:10]:
+                if not isinstance(row, dict):
+                    continue
+                safe_row: dict[str, object] = {}
+                for source_key, safe_key in {
+                    "loan_type": "loan_type",
+                    "loan_status": "loan_status",
+                    "outstanding_balance": "outstanding_balance",
+                    "branch": "branch",
+                    "account_status": "account_status",
+                }.items():
+                    if row.get(source_key) not in {None, ""}:
+                        safe_row[safe_key] = row.get(source_key)
+                if safe_row:
+                    safe_records.append(safe_row)
+            return {"records": safe_records, "record_count": len(payload)}
+        return {}
+
+    def _safe_loan_record(self, loan: dict[str, object]) -> dict[str, object]:
+        safe: dict[str, object] = {}
+        for source_key, safe_key in {
+            "loantype": "loan_type",
+            "loanstatus": "status",
+            "loanamount": "loan_amount",
+            "interestrate": "interest_rate",
+            "tenuremonths": "tenure_months",
+            "emi": "emi",
+            "outstandingbalance": "outstanding_balance",
+            "startdate": "start_date",
+            "enddate": "end_date",
+        }.items():
+            value = loan.get(source_key)
+            if value not in {None, ""}:
+                safe[safe_key] = redact_text(str(value)) if isinstance(value, str) else value
+        return safe
+
+    def _safe_transaction_record(self, transaction: dict[str, object]) -> dict[str, object]:
+        safe: dict[str, object] = {}
+        for source_key, safe_key in {
+            "transactiondate": "date",
+            "transactiontype": "type",
+            "amount": "amount",
+            "merchant": "merchant",
+            "category": "category",
+            "balanceafter": "balance_after",
+        }.items():
+            value = transaction.get(source_key)
+            if value not in {None, ""}:
+                safe[safe_key] = redact_text(str(value)) if isinstance(value, str) else value
+        return safe
+
+    def _looks_like_internal_response(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(token in lowered for token in ["db_tool", "tool output", "raw json", "database field", "prompt"])
 
     def _build_db_response(self, state: BankingState) -> str:
         raw_output = str(state.get("tool_outputs", {}).get("db_tool", ""))
@@ -711,44 +1159,13 @@ class MultiAgentBankingAssistant:
             lines.append("Next step: ask about repayment options, prepayment impact, EMI details, or closure process for any listed loan.")
         return "\n".join(lines)
 
-    def _is_personalized_guidance_query(self, state: BankingState) -> bool:
-        if state.get("route") != "personalized":
-            return False
-        query = state.get("user_query", "").lower()
-        guidance_terms = [
-            "explain",
-            "option",
-            "options",
-            "repayment",
-            "prepayment",
-            "foreclosure",
-            "part payment",
-            "part-payment",
-            "emi holiday",
-            "moratorium",
-            "how can i",
-            "what can i",
-            "what are",
-            "pay extra",
-            "extra payment",
-            "prepay",
-            "prepayment",
-            "part payment",
-            "foreclosure",
-            "reduce tenure",
-            "reduce emi",
-        ]
-        domain_terms = ["loan", "emi", "repay", "repayment", "home loan", "personal loan", "auto loan"]
-        return any(term in query for term in guidance_terms) and (
-            any(term in query for term in domain_terms) or self._history_mentions_loan(state.get("chat_history", []))
-        )
-
     def _build_guidance_query(self, state: BankingState, db_output: str) -> str:
         loan_types = self._extract_safe_loan_types(db_output)
         query = redact_text(state.get("user_query", ""))
+        standalone = redact_text(state.get("standalone_query", "") or query)
         if loan_types:
-            return f"{' '.join(loan_types)} loan repayment options prepayment foreclosure EMI policy"
-        return query
+            return f"{standalone}\nRelevant loan types: {', '.join(loan_types)}"
+        return standalone
 
     def _build_personalized_guidance_response(self, state: BankingState) -> str:
         outputs = state.get("tool_outputs", {})
@@ -823,11 +1240,25 @@ class MultiAgentBankingAssistant:
             return True
         return False
 
-    def _safe_tool_call(self, tool_name: str, argument: str) -> str:
-        try:
-            return self.mcp_client.call_tool(tool_name, argument)
-        except Exception as exc:
-            return f"{tool_name} failed: {exc}"
+    def _safe_tool_call(self, tool_name: str, argument: str, state: BankingState | None = None) -> str:
+        start_ms = now_ms()
+        trace_id = state.get("trace_id", "") if state else ""
+        with start_span(tool_name, input_payload=redact_text(argument), metadata={"trace_id": trace_id, "tool_name": tool_name}) as span:
+            try:
+                result = self.mcp_client.call_tool(tool_name, argument)
+                latency = elapsed_ms(start_ms)
+                confidence = self._extract_confidence(result)
+                span.update(output=redact_json_text(str(result))[:4000], metadata={"status": "success", "latency_ms": latency, "confidence_score": confidence})
+                if state is not None:
+                    self._add_step_log(state, "mcp_tool_call", status="success", tool_used=tool_name, latency_ms=latency, confidence_score=confidence)
+                return result
+            except Exception as exc:
+                latency = elapsed_ms(start_ms)
+                error_text = f"{tool_name} failed: {exc}"
+                span.update(output=redact_text(error_text), metadata={"status": "error", "latency_ms": latency, "error_type": type(exc).__name__}, error=redact_text(error_text))
+                if state is not None:
+                    self._add_step_log(state, "mcp_tool_call", status="error", tool_used=tool_name, latency_ms=latency, error_type=type(exc).__name__, error=redact_text(error_text))
+                return error_text
 
     def _storage_safe_response(self, state: BankingState) -> str:
         if "db_tool" in state.get("tool_outputs", {}) or state.get("route") == "personalized":
@@ -845,7 +1276,7 @@ class MultiAgentBankingAssistant:
             "query": redact_text(state.get("user_query", "")),
             "reason": redact_text(state.get("risk_reason", "")),
         }
-        return self._safe_tool_call("create_escalation", json.dumps(payload))
+        return self._safe_tool_call("create_escalation", json.dumps(payload), state=state)
 
     def _extract_confidence(self, raw: str) -> float:
         try:
@@ -866,6 +1297,50 @@ class MultiAgentBankingAssistant:
         item = redact_mapping({"timestamp": datetime.now(timezone.utc).isoformat(), "step": step, **payload})
         state.setdefault("logs", []).append(item)
 
+    def _trace_observability_metadata(self, state: BankingState) -> dict[str, Any]:
+        logs = state.get("logs", [])
+        step_latencies: dict[str, int] = {}
+        tool_latencies: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        if isinstance(logs, list):
+            for item in logs:
+                if not isinstance(item, dict):
+                    continue
+                step = str(item.get("step", "unknown"))
+                latency = item.get("latency_ms")
+                if isinstance(latency, int):
+                    if step == "mcp_tool_call":
+                        tool_latencies.append(
+                            {
+                                "tool": str(item.get("tool_used", "unknown")),
+                                "latency_ms": latency,
+                                "status": str(item.get("status", "success")),
+                            }
+                        )
+                    else:
+                        step_latencies[step] = latency
+                if item.get("status") == "error" or item.get("error_type") or item.get("error"):
+                    errors.append(
+                        {
+                            "step": step,
+                            "tool": str(item.get("tool_used", "")),
+                            "error_type": str(item.get("error_type", "")),
+                            "message": redact_text(str(item.get("error", "")))[:240],
+                        }
+                    )
+        return {
+            "status": "error" if errors else "success",
+            "route": state.get("route", ""),
+            "risk_level": state.get("risk_level", ""),
+            "risk_blocked": bool(state.get("blocked")),
+            "tools_used": list(state.get("tool_outputs", {}).keys()),
+            "total_latency_ms": state.get("total_latency_ms", 0),
+            "step_latencies_ms": step_latencies,
+            "tool_latencies": tool_latencies[:20],
+            "error_count": len(errors),
+            "errors": errors[:5],
+        }
+
     def _write_audit_log(self, state: BankingState) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -874,6 +1349,9 @@ class MultiAgentBankingAssistant:
             "risk_level": state.get("risk_level"),
             "tools_used": list(state.get("tool_outputs", {}).keys()),
             "confidence_score": state.get("confidence_score", 0.0),
+            "trace_id": state.get("trace_id", ""),
+            "started_at": state.get("started_at", ""),
+            "total_latency_ms": state.get("total_latency_ms", 0),
             "final_response": self._storage_safe_response(state),
             "logs": redact_value(state.get("logs", [])),
         }
