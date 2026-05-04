@@ -65,7 +65,7 @@ def handle_login(email: str, password: str) -> None:
         return
     st.session_state.authenticated = True
     st.session_state.user_name = user_profile.get("customer_name") or user_profile.get("email", "")
-    st.session_state.role = user_profile["role"]
+    st.session_state.role = user_profile.get("role") or ("customer" if user_profile.get("customer_id") or user_profile.get("customerid") else "")
     st.session_state.user_profile = user_profile
     st.session_state.chat_history = []
     st.session_state.latest_error = ""
@@ -89,12 +89,16 @@ def normalized_session_role() -> str:
         "customer_support_agent": "support",
     }
     raw_role = str(st.session_state.role).lower().replace(" & ", " ").replace(" ", "_")
-    return role_map.get(raw_role, str(profile.get("role", "customer")).lower())
+    profile_role = str(profile.get("role", "") or "").lower()
+    if not raw_role and (profile.get("customer_id") or profile.get("customerid")):
+        return "customer"
+    return role_map.get(raw_role, role_map.get(profile_role, profile_role or "customer"))
 
 
 def profile_customer_id(profile: dict[str, object] | None = None) -> str:
     profile = profile or st.session_state.user_profile
-    return str(profile.get("customer_id") or profile.get("customerid") or "")
+    customer_id = str(profile.get("customer_id") or profile.get("customerid") or "").strip()
+    return "" if customer_id.upper() in {"EMPTY", "NULL", "NONE"} else customer_id
 
 
 def submit_sidebar_query(query: str) -> None:

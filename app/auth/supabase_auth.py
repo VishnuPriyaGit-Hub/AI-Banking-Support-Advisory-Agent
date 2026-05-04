@@ -8,6 +8,11 @@ from app.core.config import get_env_value
 from app.tools.supabase_tool import SupabaseTool
 
 
+def _clean_profile_value(value: object) -> str:
+    text = str(value or "").strip()
+    return "" if text.upper() in {"EMPTY", "NULL", "NONE"} else text
+
+
 class SupabaseAuthClient:
     def __init__(self) -> None:
         self.url = get_env_value("SUPABASE_URL")
@@ -57,16 +62,36 @@ class SupabaseAuthClient:
         )
         role_row = role_rows[0] if isinstance(role_rows, list) and role_rows else {}
         customer_rows = tool.get_customer_by_auth_user(str(user.get("id")))
+        if not customer_rows:
+            customer_rows = admin_tool._request(  # noqa: SLF001
+                "GET",
+                "customers",
+                params={"authuserid": f"eq.{user.get('id')}", "select": "*"},
+                use_service_role=True,
+            )
+        if not customer_rows and user.get("email"):
+            customer_rows = admin_tool._request(  # noqa: SLF001
+                "GET",
+                "customers",
+                params={"email": f"eq.{user.get('email')}", "select": "*"},
+                use_service_role=True,
+            )
         customer_row = customer_rows[0] if isinstance(customer_rows, list) and customer_rows else {}
-        customer_id = customer_row.get("customerid", "")
-        customer_name = customer_row.get("customername", user.get("email", ""))
+        customer_id = _clean_profile_value(customer_row.get("customerid", ""))
+        customer_name = _clean_profile_value(customer_row.get("customername", user.get("email", "")))
+        role = _clean_profile_value(role_row.get("role", ""))
+        if not role and customer_id:
+            role = "customer"
+        branch = _clean_profile_value(role_row.get("branch", ""))
+        if not branch:
+            branch = _clean_profile_value(customer_row.get("branch", ""))
 
         return {
             "id": str(user.get("id", "")),
             "email": user.get("email", ""),
             "access_token": access_token,
-            "role": role_row.get("role", ""),
-            "branch": role_row.get("branch", ""),
+            "role": role,
+            "branch": branch,
             "customer_id": customer_id,
             "customerid": customer_id,
             "customer_name": customer_name,

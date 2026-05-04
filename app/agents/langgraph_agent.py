@@ -95,6 +95,11 @@ class MultiAgentBankingAssistant:
         self.evaluation_log_path = EVALUATION_LOG_PATH
         self.graph = self._build_graph()
 
+    @staticmethod
+    def _clean_metadata_value(value: object) -> str:
+        text = str(value or "").strip()
+        return "" if text.upper() in {"EMPTY", "NULL", "NONE"} else text
+
     def run(
         self,
         user_query: str,
@@ -110,9 +115,9 @@ class MultiAgentBankingAssistant:
         role = self.normalize_role(role)
         metadata = {
             "role": role,
-            "customer_id": customer_id or "",
-            "branch": branch or "",
-            "auth_user_id": auth_user_id or "",
+            "customer_id": self._clean_metadata_value(customer_id),
+            "branch": self._clean_metadata_value(branch),
+            "auth_user_id": self._clean_metadata_value(auth_user_id),
             "user_jwt": user_jwt or "",
             "behavior_preferences": redact_text(behavior_preferences or ""),
         }
@@ -647,12 +652,19 @@ class MultiAgentBankingAssistant:
                 client = SupabaseTool(user_jwt=jwt)
                 data_scope = state.get("data_scope") or self._resolve_data_scope(state.get("route", "personalized"), role, "none", state.get("required_tools", []))
                 if role == "customer":
+                    customer_id = self._clean_metadata_value(metadata.get("customer_id", ""))
+                    if not customer_id:
+                        result = "DB tool failed: no linked customer profile was found for this authenticated user."
+                        latency = elapsed_ms(start_ms)
+                        span.update(output="[REDACTED_PERSONALIZED_DB_CONTEXT]", metadata={"status": "error", "latency_ms": latency, "error_type": "MissingCustomerProfile"})
+                        self._add_step_log(state, "mcp_tool_call", status="error", tool_used="db_tool", latency_ms=latency, error_type="MissingCustomerProfile", error=redact_text(result))
+                        return result
                     if data_scope == "customer_loans":
-                        result = json.dumps(client.get_customer_loans(metadata.get("customer_id", "")), indent=2)
+                        result = json.dumps(client.get_customer_loans(customer_id), indent=2)
                     elif data_scope == "customer_transactions":
-                        result = json.dumps(client.get_customer_transactions(metadata.get("customer_id", "")), indent=2)
+                        result = json.dumps(client.get_customer_transactions(customer_id), indent=2)
                     else:
-                        result = json.dumps(client.get_customer_snapshot(metadata.get("customer_id", "")), indent=2)
+                        result = json.dumps(client.get_customer_snapshot(customer_id), indent=2)
                 elif role == "manager":
                     if data_scope == "branch_loan_customers":
                         result = json.dumps(client.get_branch_loan_customers(metadata.get("branch", "")), indent=2)
@@ -1248,6 +1260,10 @@ class MultiAgentBankingAssistant:
                 if loan_types:
                     joined_types = ", ".join(loan_types)
                     return f"I found your {joined_types} loan context. Please ask what you would like to know about repayment, EMI, foreclosure, prepayment, or account servicing."
+            if isinstance(loans, list) and not loans and any(token in query for token in ["loan", "repayment", "emi"]):
+                return "I could not find any loan accounts linked to your customer profile."
+            if isinstance(transactions, list) and not transactions and any(token in query for token in ["transaction", "transactions", "debit", "credit"]):
+                return "I could not find recent transactions linked to your customer profile."
             return "I found your account context, but I need a more specific question to answer without exposing account metadata."
 
         if isinstance(payload, list):
@@ -1385,7 +1401,7 @@ class MultiAgentBankingAssistant:
         except json.JSONDecodeError:
             return False
         if isinstance(payload, dict):
-            return any(payload.get(key) for key in ["customer", "loans", "transactions"])
+            return any(key in payload for key in ["customer", "loans", "transactions"])
         if isinstance(payload, list):
             return True
         return False
