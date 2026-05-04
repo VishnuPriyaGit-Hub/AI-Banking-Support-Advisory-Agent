@@ -1533,6 +1533,7 @@ class MultiAgentBankingAssistant:
     def _write_evaluation_log(self, state: BankingState) -> None:
         self.evaluation_log_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
+            "entry_type": "evaluation",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "trace_id": state.get("trace_id", ""),
             "route": state.get("route", ""),

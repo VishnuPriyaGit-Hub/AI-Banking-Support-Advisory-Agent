@@ -341,7 +341,7 @@ def load_evaluation_records(limit: int = 200) -> list[dict[str, object]]:
                     payload = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(payload, dict):
+                if isinstance(payload, dict) and payload.get("entry_type") != "metadata":
                     rows.append(payload)
     except OSError:
         return []

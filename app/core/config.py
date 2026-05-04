@@ -55,6 +55,7 @@ PLACEHOLDER_ENV_VALUES = {
 def ensure_runtime_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    EVALUATION_LOG_PATH.touch(exist_ok=True)
 
 
 def load_env_file(env_path: Path = ENV_FILE_PATH) -> None:
