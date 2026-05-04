@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -12,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.agents.langgraph_agent import MultiAgentBankingAssistant
 from app.auth.supabase_auth import SupabaseAuthClient
+from app.core.config import EVALUATION_LOG_PATH
 from app.mcp.client import LocalMCPClient
 from app.memory.store import ConversationMemory
 
@@ -26,6 +28,7 @@ def init_session_state() -> None:
         "chat_history": [],
         "latest_error": "",
         "show_escalations": False,
+        "show_support_dashboard": False,
         "manager_response_checked": False,
         "pending_manager_responses": [],
         "pending_user_message": "",
@@ -43,6 +46,7 @@ def reset_session() -> None:
     st.session_state.user_profile = {}
     st.session_state.chat_history = []
     st.session_state.latest_error = ""
+    st.session_state.show_support_dashboard = False
     st.session_state.manager_response_checked = False
     st.session_state.pending_manager_responses = []
     st.session_state.pending_user_message = ""
@@ -172,6 +176,11 @@ def render_sidebar() -> None:
                 "Show escalations",
                 value=st.session_state.show_escalations,
             )
+        if normalized_session_role() == "support":
+            st.session_state.show_support_dashboard = st.toggle(
+                "Support dashboard",
+                value=st.session_state.show_support_dashboard,
+            )
 
         if st.button("Delete my memory", use_container_width=True):
             user_id = profile.get("id") or profile_customer_id(profile) or st.session_state.role
@@ -227,6 +236,168 @@ def render_escalations() -> None:
                 st.caption(f"Decision by: {item.get('manager_user', '')}")
             elif item.get("target") == "branch_manager" and role in {"manager", "branch_manager", "admin"}:
                 render_manager_decision_form(item)
+
+
+def render_support_dashboard() -> None:
+    if normalized_session_role() != "support":
+        st.warning("Support dashboard is available only for support staff.")
+        return
+
+    st.subheader("Support Dashboard")
+    escalations = load_all_escalations()
+    evaluations = load_evaluation_records()
+
+    recent_escalations = filter_recent_escalations(escalations, days=7)
+    pending_statuses = {"open", "approved_pending_action"}
+    branch_pending = [
+        item for item in recent_escalations
+        if item.get("target") == "branch_manager" and str(item.get("status", "")).lower() in pending_statuses
+    ]
+    risk_pending = [
+        item for item in recent_escalations
+        if item.get("target") == "risk_team" and str(item.get("status", "")).lower() in pending_statuses
+    ]
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Branch Manager Pending (7d)", len(branch_pending))
+    col2.metric("Risk Team Pending (7d)", len(risk_pending))
+    col3.metric("Evaluated Responses", len(evaluations))
+    col4.metric("Low Score Responses", count_low_score_evaluations(evaluations))
+
+    st.markdown("#### Pending Escalations - Last 7 Days")
+    pending_rows = summarize_pending_escalations(branch_pending + risk_pending)
+    if pending_rows:
+        st.dataframe(pending_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No pending branch manager or risk team escalations.")
+
+    st.markdown("#### Failure Analysis")
+    if not evaluations:
+        st.info("No evaluation records found yet.")
+        return
+
+    avg_score = sum(float(item.get("evaluation_score", 0.0) or 0.0) for item in evaluations) / len(evaluations)
+    st.caption(f"Average evaluation score: {avg_score:.3f}")
+
+    metric_failures = aggregate_metric_failures(evaluations)
+    if metric_failures:
+        st.write("Metric failure counts")
+        st.dataframe(metric_failures, use_container_width=True, hide_index=True)
+
+    low_score_rows = summarize_low_score_evaluations(evaluations)
+    if low_score_rows:
+        st.write("Recent low-scoring responses")
+        st.dataframe(low_score_rows, use_container_width=True, hide_index=True)
+    else:
+        st.success("No low-scoring evaluation records.")
+
+
+def load_all_escalations() -> list[dict[str, object]]:
+    raw = LocalMCPClient().call_tool("list_escalations", json.dumps({}))
+    try:
+        rows = json.loads(raw)
+    except Exception:
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def filter_recent_escalations(rows: list[dict[str, object]], days: int = 7) -> list[dict[str, object]]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    recent: list[dict[str, object]] = []
+    for item in rows:
+        created_at = parse_iso_datetime(str(item.get("created_at", "")))
+        if created_at and created_at >= cutoff:
+            recent.append(item)
+    return recent
+
+
+def parse_iso_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_evaluation_records(limit: int = 200) -> list[dict[str, object]]:
+    if not EVALUATION_LOG_PATH.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    try:
+        with EVALUATION_LOG_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    rows.append(payload)
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+def count_low_score_evaluations(rows: list[dict[str, object]], threshold: float = 0.75) -> int:
+    return sum(1 for item in rows if float(item.get("evaluation_score", 0.0) or 0.0) < threshold)
+
+
+def summarize_pending_escalations(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    summary: list[dict[str, object]] = []
+    for item in sorted(rows, key=lambda row: str(row.get("created_at", "")), reverse=True)[:25]:
+        summary.append(
+            {
+                "created_at": item.get("created_at", ""),
+                "target": item.get("target", ""),
+                "risk": item.get("risk_level", ""),
+                "status": item.get("status", ""),
+                "action": item.get("action_type", ""),
+                "branch": item.get("branch", ""),
+                "customer": item.get("customer_display", "Linked customer"),
+            }
+        )
+    return summary
+
+
+def aggregate_metric_failures(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for item in rows:
+        metrics = item.get("evaluation_metrics", {})
+        if not isinstance(metrics, dict):
+            continue
+        for key, value in metrics.items():
+            if int(value or 0) == 0:
+                counts[str(key)] = counts.get(str(key), 0) + 1
+    return [
+        {"metric": metric, "failure_count": count}
+        for metric, count in sorted(counts.items(), key=lambda pair: pair[1], reverse=True)
+    ]
+
+
+def summarize_low_score_evaluations(rows: list[dict[str, object]], threshold: float = 0.75) -> list[dict[str, object]]:
+    low_rows = [
+        item for item in rows
+        if float(item.get("evaluation_score", 0.0) or 0.0) < threshold
+    ]
+    summary: list[dict[str, object]] = []
+    for item in sorted(low_rows, key=lambda row: str(row.get("timestamp", "")), reverse=True)[:25]:
+        summary.append(
+            {
+                "timestamp": item.get("timestamp", ""),
+                "score": item.get("evaluation_score", 0.0),
+                "route": item.get("route", ""),
+                "risk": item.get("risk_level", ""),
+                "reason": item.get("evaluation_reason", ""),
+                "query": item.get("query", ""),
+            }
+        )
+    return summary
 
 
 def render_manager_decision_form(item: dict[str, object]) -> None:
@@ -539,6 +710,10 @@ def render_chat() -> None:
         render_escalations()
         st.divider()
 
+    if st.session_state.show_support_dashboard:
+        render_support_dashboard()
+        st.divider()
+
     if st.session_state.latest_error:
         st.error(st.session_state.latest_error)
     if st.session_state.feedback_status:
@@ -554,6 +729,12 @@ def render_chat() -> None:
                 st.caption(f"Sources: {item['sources']}")
             if item["speaker"] == "assistant" and item.get("confidence_score"):
                 st.caption(f"Confidence Score: {item['confidence_score']}")
+            if item["speaker"] == "assistant" and item.get("evaluation_score") is not None:
+                st.caption(f"Evaluation Score: {item.get('evaluation_score', 0.0)}")
+                metrics = item.get("evaluation_metrics") or {}
+                if isinstance(metrics, dict) and metrics:
+                    metric_text = " | ".join(f"{key}: {value}" for key, value in metrics.items())
+                    st.caption(f"Evaluation Metrics: {metric_text}")
             if item["speaker"] == "assistant" and item.get("tools_used"):
                 st.caption(f"Tool Used: {item['tools_used']}")
             if item["speaker"] == "assistant" and item.get("route"):
@@ -600,6 +781,9 @@ def render_chat() -> None:
                     "route": result.get("route", ""),
                     "risk_level": result.get("risk_level", ""),
                     "confidence_score": result.get("confidence_score", 0.0),
+                    "evaluation_score": result.get("evaluation_score", 0.0),
+                    "evaluation_metrics": result.get("evaluation_metrics", {}),
+                    "evaluation_reason": result.get("evaluation_reason", ""),
                     "adaptation_note": result.get("adaptation_note", ""),
                 }
             )

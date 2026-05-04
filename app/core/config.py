@@ -13,6 +13,7 @@ PROMPTS_DIR = PROJECT_ROOT / "prompts"
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
 DEFAULT_LOG_PATH = LOG_DIR / "baseline_agent_runs.jsonl"
+EVALUATION_LOG_PATH = LOG_DIR / "evaluation_runs.jsonl"
 DEMO_LOG_PATH = LOG_DIR / "sample_interactions.jsonl"
 PHASE2_PROMPT_PATH = PROMPTS_DIR / "phase2" / "system_prompt.txt"
 PHASE3_PROMPT_PATH = PROMPTS_DIR / "phase3" / "system_prompt.txt"

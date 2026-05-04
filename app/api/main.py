@@ -36,6 +36,9 @@ class ChatResponse(BaseModel):
     tools_used: list[str]
     required_tools: list[str]
     confidence_score: float
+    evaluation_score: float = 0.0
+    evaluation_metrics: dict[str, int] = Field(default_factory=dict)
+    evaluation_reason: str = ""
     escalated_to: str = ""
     adaptation_note: str = ""
     trace_id: str = ""
@@ -123,6 +126,9 @@ def chat(request: ChatRequest) -> ChatResponse:
         tools_used=list(result.get("tools_used", [])),
         required_tools=list(result.get("required_tools", [])),
         confidence_score=float(result.get("confidence_score", 0.0) or 0.0),
+        evaluation_score=float(result.get("evaluation_score", 0.0) or 0.0),
+        evaluation_metrics=dict(result.get("evaluation_metrics", {}) or {}),
+        evaluation_reason=str(result.get("evaluation_reason", "")),
         escalated_to=str(result.get("escalated_to", "")),
         adaptation_note=str(result.get("adaptation_note", "")),
         trace_id=str(result.get("trace_id", "")),
