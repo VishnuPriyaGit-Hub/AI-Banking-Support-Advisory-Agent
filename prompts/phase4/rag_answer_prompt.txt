@@ -1,0 +1,6 @@
+User role: {{USER_ROLE}}
+Original question: {{ORIGINAL_QUESTION}}
+Standalone retrieval question: {{STANDALONE_QUESTION}}
+
+Retrieved context:
+{{RETRIEVED_CONTEXT}}

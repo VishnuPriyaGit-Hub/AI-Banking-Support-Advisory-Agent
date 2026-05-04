@@ -1,0 +1,9 @@
+Given chat history and the latest user question, rewrite the latest question as a standalone query for banking document retrieval.
+
+Preserve the user's exact intent.
+Return only the rewritten standalone query.
+
+Chat history:
+{{CHAT_HISTORY}}
+
+Latest question: {{LATEST_QUESTION}}

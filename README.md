@@ -1,448 +1,504 @@
-# Phase 1: Problem Understanding and Definition
+# Banking Support Agent
 
-## Project
+A LangGraph-based multi-agent banking assistant with a Streamlit UI, FastAPI service, Supabase authentication/database access, Milvus/Zilliz-backed RAG, MCP-style tools, guardrails, escalation handling, feedback adaptation, evaluation scoring, and Langfuse tracing.
 
-AI Banking Support and Advisory Agent (Non-Transactional)
-### Persona 1. Customer (End User)
+Live services:
 
-Who: Retail banking user interacting with chatbot
+- UI: https://banking-support-ui.onrender.com
+- API: https://banking-support-api.onrender.com
+- API health check: https://banking-support-api.onrender.com/health
 
-Needs:
+## Project Overview
 
-Deposits, loans, EMI, credit cards
-Product info & FAQs
-Fraud awareness
+The Banking Support Agent is a role-aware banking assistant designed for safe customer support and internal staff workflows. It can answer general banking questions, fetch authorized customer information, perform banking calculations, route escalation cases, and collect feedback for future response adaptation.
 
-AI Behavior:
+The system is advisory and support-oriented. It does not execute money movement, loan approvals, legal advice, or unsafe account actions directly.
 
-Simple, clear, non-technical responses
-Must refuse sensitive actions (money transfer, account access)
-Guide + educate
-### Persona 2. Branch Manager (Escalation Persona)
+## Architecture
 
-Who: Handles complex or unresolved cases
-
-Needs:
-
-Summarized user issue
-Risk level (low/medium/high)
-Suggested next steps
-
-AI Behavior:
-
-Provide concise summaries
-Recommend escalation (not execute actions)
-### Persona 3. Risk & Compliance Officer
-
-Who: Ensures fraud prevention and policy adherence
-
-Needs:
-
-Fraud-related queries
-Suspicious behavior classification
-Policy explanations
-
-AI Behavior:
-
-Strict, rule-based responses
-No guessing / no hallucination
-Always prioritize safety
-### Persona 4. Admin (System Oversight)
-
-Who: Monitors system behavior
-
-Needs:
-
-How queries are classified
-Safety rule enforcement
-Audit-level explanations
-
-AI Behavior:
-
-Transparent, structured responses
-No exposure of sensitive user data
-### Persona 5. Customer Support Agent (Human Assist)
-
-Who: Bank employee using AI as co-pilot
-
-Needs:
-
-Suggested replies to customers
-Context summaries
-Next best action
-
-AI Behavior:
-
-Assist human (not replace)
-Provide ready-to-use responses
-🧩 Simple Persona Routing (Use This in Design)
-Customer query → Customer Persona
-Fraud / suspicious → Risk Persona
-Complex / unclear → Branch Manager
-Internal / audit → Admin
-Human-assisted flow → Support Agent
-
-## Daily Workflow
-
-- A customer or bank staff member has a banking-related question.
-- They open the chat interface and log in with their assigned role (customer, support agent, admin, etc.).
-- The system assigns the corresponding persona based on the role.
-- The user asks a question in natural language.
-- The system analyzes the query for:
-     - Intent (loan, EMI, fraud, general info)
-     - Risk level (safe, ambiguous, high-risk, disallowed)
-- The system routes the query to the appropriate persona:
-   - Customer → general queries
-   - Risk → fraud/security
-   - Branch Manager → escalations
-   - Admin → internal/audit
-- The system retrieves relevant banking knowledge (RAG) as context.
-- The system applies safety rules (no transactions, no PII exposure, no financial/legal advice).
-### The system responds with one of the following:
-- Direct informational answer
-- Clarification question (if query is unclear)
-- Refusal for restricted or unsafe requests
-- Escalation guidance for fraud, security, or high-risk cases
-
-## 2. Problem Statement
-
-Build an AI assistant that provides safe, accurate, and non-transactional banking support and guidance. The system must enforce compliance boundaries by refusing transactional actions, avoiding hallucinated customer data, and escalating fraud or security-related situations.
-
-## 3. Inputs, Outputs, Constraints, and Assumptions
-
-### Inputs
-
-- User role
-- User query in natural language
-- Optional conversation history in the active session
-
-### Outputs
-
-Structured response containing:
-
-- Direct answer or guidance
-- Clarification when the request is incomplete or ambiguous
-- Refusal when the request is disallowed
-- Escalation when the request is high-risk
-
-### Constraints
-
-- No money movement or transaction execution
-- No balance lookup or customer-specific account access
-- No product approval or decision-making
-- No storage of sensitive personal data
-- No hallucinated personal or banking data
-- Must escalate fraud, account compromise, or security threats
-
-### Assumptions
-
-- The assistant is not connected to core banking systems
-- The assistant has no access to live account or transaction data
-- Banking policies and examples are used as reference context
-- The assistant is used for support and advisory guidance only
-
-## 4. Example User Questions
-
-### Safe
-
-- What is the interest rate for a fixed deposit?
-- How does a home loan work?
-- What is EMI?
-
-### Ambiguous
-
-- I want to send money
-- Tell me about loans
-- Open an FD
-
-### Disallowed
-
-- Transfer 10,000 to this account
-- What is my account balance?
-- Approve this loan for me
-
-### High-Risk
-
-- Money got deducted but I did not do it
-- I think my account is hacked
-- Someone asked for my OTP
-
-## 5. Success Criteria
-
-### Functional
-
-- Answers common informational banking questions accurately
-- Uses the role and query context correctly
-- Produces useful clarification when the intent is ambiguous
-
-### Safety
-
-- Refuses transactional and account-specific requests
-- Avoids hallucinating personal or financial data
-- Escalates fraud and security issues consistently
-
-### User Experience
-
-- Responds in clear and simple language
-- Gives actionable next steps
-- Maintains a clean role-based support flow
-
-## 6. Failure Cases and Edge Scenarios
-
-### Failure Cases to Avoid
-
-- Hallucinating account details such as balance or transaction history
-- Acting as if a transfer, approval, or account change was completed
-- Missing escalation for fraud, hacking, or unauthorized access
-- Giving direct financial decisions instead of general guidance
-
-### Edge Scenarios
-
-- Mixed intent: Explain FD and open one
-- Role-based query differences between User and Admin
-- Repeated attempts to bypass safety rules
-- Panic situations such as all my money is gone
-- Incomplete questions such as What is EMI
-
-## Final Insight
-
-This system is not just a chatbot. It is a policy-aware banking support assistant that classifies intent, respects safety boundaries, and uses an LLM to generate non-transactional guidance.
-
-## Phase 4 RAG Loading
-
-This project now includes a simple ingestion script that:
-
-- reads selected documents from `Docs/`
-- chunks the text
-- creates embeddings
-- loads the vectors into Zilliz Cloud / Milvus
-
-Only these files are considered:
-
-- `Accounts.docx`
-- `Bank FAQ's.docx`
-- `Deposits.docx`
-- `Loan.docx`
-
-### Required `.env` values
-
-Add these values before running the loader:
-
-```env
-EMBEDDING_BASE_URL=https://api.openai.com/v1
-EMBEDDING_API_KEY=your_embedding_api_key
-EMBEDDING_MODEL=text-embedding-3-small
-
-ZILLIZ_ENDPOINT=your_zilliz_public_endpoint
-ZILLIZ_API_KEY=your_zilliz_api_key
-ZILLIZ_CLUSTER_ID=your_zilliz_cluster_id
-ZILLIZ_COLLECTION_NAME=banking_rag_chunks
+```text
+User Query
+  -> Streamlit UI / FastAPI
+  -> LangGraph Orchestration
+  -> Planner Agent
+  -> Risk & Compliance Agent
+  -> MCP Tool Calls
+  -> Risk & Compliance Check
+  -> Response Generation Agent
+  -> LLM-as-Judge Evaluation
+  -> Final Response
 ```
 
-Notes:
+## Main Components
 
-- `EMBEDDING_BASE_URL` and `EMBEDDING_API_KEY` can point to any OpenAI-compatible embeddings endpoint.
-- `ZILLIZ_CLUSTER_ID` is stored in the ingest summary for reference. The actual Milvus connection uses `ZILLIZ_ENDPOINT` and `ZILLIZ_API_KEY`.
+### Streamlit UI
 
-### Install dependencies
+The Streamlit app provides login, chat, feedback collection, previous query history, escalation review workflows, evaluation score display, and the support staff dashboard.
+
+Main file:
+
+```text
+app/ui/streamlit_app.py
+```
+
+### FastAPI Service
+
+The FastAPI service exposes the assistant through API endpoints for deployment and integration.
+
+Main file:
+
+```text
+app/api/main.py
+```
+
+### LangGraph Agent
+
+The LangGraph agent coordinates planning, routing, risk checks, tool calls, response generation, evaluation, memory, feedback adaptation, logging, and tracing.
+
+Main file:
+
+```text
+app/agents/langgraph_agent.py
+```
+
+## Agents
+
+### Planner / Orchestrator Agent
+
+The planner is LLM-first. It receives the user query, role, metadata, and conversation context, then produces a structured plan.
+
+It decides:
+
+- Query route: general, personalized, calculation, or escalation
+- Required tools
+- Data scope
+- Whether customer/account/loan/transaction context is needed
+- Whether calculation should be performed
+- Whether escalation is required
+
+Guardrails still validate the planner output so the LLM cannot bypass safety rules.
+
+### Risk & Compliance Agent
+
+The risk agent classifies the request as low, medium, or high risk.
+
+- Low risk: allowed
+- Medium risk: escalated to branch manager
+- High risk: blocked or escalated to risk team
+
+It prevents unauthorized access to customer data and blocks unsafe actions.
+
+### Response Generation Agent
+
+The response agent combines sanitized tool outputs into a clear user-facing response.
+
+It must not expose:
+
+- Internal prompts
+- Tool internals
+- Database schema details
+- Raw DB payloads
+- Sensitive customer data
+- Hidden reasoning
+
+### LLM-as-Judge Evaluator
+
+Before displaying the final answer, an evaluator scores the response with 0/1 checks and produces a consolidated evaluation score.
+
+Evaluation checks include:
+
+- Answered the user query
+- Grounded in available context
+- Correct route and tool usage
+- Guardrail compliance
+- PII safety
+- No internal leakage
+- Customer-friendly response
+- No visible system error
+
+## MCP-Style Tools
+
+Tools retrieve, calculate, search, or execute workflow actions. They are not separate agents.
+
+### RAG Tool
+
+Uses Milvus/Zilliz for retrieval over banking FAQs, policies, products, and general knowledge documents.
+
+Used for:
+
+- Banking concepts
+- Product explanations
+- Policy questions
+- Repayment options
+- General advisory context
+
+### Supabase DB Tool
+
+Fetches authorized customer, account, loan, branch, support, and transaction data from Supabase.
+
+Important behavior:
+
+- Queries only the required data scope
+- Masks sensitive values
+- Does not send raw database rows directly to the LLM
+- Uses transaction-only retrieval when the user asks for transaction details
+
+### Calculator Tool
+
+Performs calculations such as:
+
+- EMI
+- Simple interest
+- Repayment impact
+- Balance summaries
+- Eligibility estimates
+
+The LLM explains the result; it does not manually calculate.
+
+### Search API Tool
+
+Used only when RAG confidence is low or external information is needed.
+
+### Escalation Tool
+
+Creates escalation records for branch manager or risk team review.
+
+## User Roles
+
+### Customer
+
+Can ask general banking questions, view authorized personal banking details, request calculations, and raise support/escalation cases.
+
+### Branch Manager
+
+Can view branch-related information, review medium-risk escalations, and approve, reject, or respond to customer escalation requests.
+
+### Admin
+
+Handles approved account/customer maintenance workflows where administrative action is required.
+
+### Support Staff
+
+Handles approved customer profile maintenance such as name, phone number, pincode, and address updates. Support staff also sees the dashboard.
+
+### Risk Staff
+
+Reviews high-risk escalations and can inspect permitted risk context for the related customer.
+
+## Escalation Flow
+
+Medium-risk cases are sent to the branch manager.
+
+High-risk cases are sent to the risk team and the customer receives a restricted-action response.
+
+Branch managers can approve, reject, or respond inside the app. When a customer logs in later, the app shows a popup with the manager response.
+
+Approved maintenance requests can move to Admin or Support depending on the request type.
+
+## Guardrails and PII Protection
+
+The system includes guardrails for banking safety and privacy.
+
+It refuses:
+
+- Money movement requests
+- Approval requests
+- Legal advice
+- Requests involving OTP, PIN, CVV, passwords, or secrets
+- Unauthorized access to another customer's data
+
+PII handling:
+
+- PII is masked before logging
+- Raw DB rows are converted into sanitized context
+- Sensitive data is not passed to the LLM unnecessarily
+- Escalation records store sanitized user text
+- Feedback cannot override safety, access, or compliance rules
+
+Examples of masked data include account numbers, card numbers, phone numbers, emails, PAN, Aadhaar, and credentials.
+
+## Memory and Feedback
+
+The system uses both short-term and long-term memory.
+
+Short-term memory:
+
+- Active Streamlit session context
+- Recent conversation turns
+
+Long-term memory:
+
+- Supabase conversation memory when configured
+- Local JSONL fallback when needed
+
+Retention policy:
+
+- Delete after 60 days of inactivity
+- Delete on explicit customer request
+
+Feedback loop:
+
+- Users can give feedback on answers
+- Feedback is stored for future interactions
+- Adaptation affects tone, detail level, and answer structure
+- Feedback does not change guardrails or data access rules
+
+## Support Dashboard
+
+The dashboard is available to support staff.
+
+It shows:
+
+- Pending branch manager escalations from the last 7 days
+- Pending risk team escalations from the last 7 days
+- Failure analysis based on evaluation scores
+- Failed evaluation dimensions for debugging
+
+## Logging, Error Capture, and Tracing
+
+### Local Logs
+
+Main audit log:
+
+```text
+logs/baseline_agent_runs.jsonl
+```
+
+Evaluation log:
+
+```text
+logs/evaluation_runs.jsonl
+```
+
+Escalation log:
+
+```text
+logs/escalations.jsonl
+```
+
+Local logs capture route, risk level, tools used, confidence score, sanitized response, latency, errors, and evaluation results.
+
+### Langfuse Tracing
+
+Langfuse tracing is supported through:
+
+```text
+app/observability/tracing.py
+```
+
+When enabled, the system creates one trace per user query and response pair.
+
+Trace metadata includes:
+
+- Route
+- Risk level
+- Tools used
+- Confidence score
+- Evaluation score
+- Latency
+- Error details when failures occur
+
+Set `TRACE_VERBOSE=false` to avoid creating many child traces for one user query.
+
+## Evaluation Metrics
+
+Each response is evaluated before display.
+
+Metrics use 0/1 scoring:
+
+- `answered_query`
+- `grounded_in_context`
+- `route_and_tools_fit`
+- `risk_guardrail_ok`
+- `pii_safe`
+- `no_internal_leakage`
+- `customer_friendly`
+- `no_error_visible`
+
+The consolidated score is shown in the UI along with the confidence score and is also stored in the evaluation log.
+
+## Local Setup
+
+Python 3.12 is recommended.
+
+Create and activate a virtual environment:
 
 ```powershell
-pip install pymilvus
+python -m venv .venv
+.\.venv\Scripts\activate
 ```
 
-### Run the loader
+Install dependencies:
 
 ```powershell
-python -m app.scripts.load_rag_to_milvus --drop-existing
+pip install -r requirements.txt
 ```
 
-Optional flags:
-
-- `--chunk-size 800`
-- `--chunk-overlap 120`
-- `--batch-size 16`
-
-### Output
-
-After loading:
-
-- vectors are inserted into the configured Zilliz / Milvus collection
-- a small summary file is written to `data/rag_ingest_summary.json`
-
-## Phase 5 Tools
-
-Minimal Phase 5 scaffolding has been added for:
-
-- Calculator tool
-- Supabase customer/loan/transaction tool
-- SearchAPI interest-rate lookup tool
-- RAG retrieval tool
-- MCP-style local server/client registry
-- LangGraph baseline agent scaffold
-- LangGraph multi-agent banking assistant with planner, risk/compliance, MCP tool execution, and response-generation nodes
-- Local escalation queue for branch manager and risk-team notifications
-- Short-term chat context plus long-term conversation memory with a 60-day inactivity retention policy
-
-Key files:
-
-- `app/tools/calculator.py`
-- `app/tools/supabase_tool.py`
-- `app/tools/searchapi_tool.py`
-- `app/tools/rag_tool.py`
-- `app/tools/langgraph_tools.py`
-- `app/mcp/server.py`
-- `app/mcp/client.py`
-- `app/agents/langgraph_agent.py`
-- `prompts/phase6/system_prompt.txt`
-- `prompts/phase6/rewrite_query_prompt.txt`
-- `prompts/phase6/calculation_prompt.txt`
-- `prompts/phase6/response_prompt.txt`
-- `app/memory/store.py`
-- `app/tools/escalation_tool.py`
-- `data/phase5_supabase_schema.sql`
-
-Suggested `.env` additions:
-
-```env
-SUPABASE_URL=your_supabase_project_url
-SUPABASE_ANON_KEY=your_supabase_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
-
-SEARCHAPI_BASE_URL=your_searchapi_endpoint
-SEARCHAPI_API_KEY=your_searchapi_key
-```
-
-Run the LangGraph baseline agent:
+Create environment file:
 
 ```powershell
-python -m app.agents.langgraph_agent --role customer --customer-id C001 --query "Show my latest 5 transactions"
+Copy-Item .env_example .env
 ```
 
-Run the Streamlit UI:
+Fill the required values in `.env`.
+
+Common environment variables:
+
+```text
+OPENAI_API_KEY=
+OPENAI_MODEL=
+OPENAI_BASE_URL=
+EMBEDDING_MODEL=
+
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+
+ZILLIZ_ENDPOINT=
+ZILLIZ_API_KEY=
+ZILLIZ_CLUSTER_ID=
+
+SEARCHAPI_API_KEY=
+SEARCHAPI_BASE_URL=
+SEARCHAPI_ENGINE=
+
+LANGFUSE_ENABLED=
+TRACE_VERBOSE=
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_HOST=
+```
+
+Do not commit `.env` or any real secrets.
+
+## Run Locally
+
+Start the Streamlit UI:
 
 ```powershell
 streamlit run app/ui/streamlit_app.py
 ```
 
-### Multi-Agent Flow
+Start the FastAPI service:
 
-The current Phase 5 implementation follows this orchestration:
-
-```text
-User Query
--> Streamlit UI
--> LangGraph Orchestration
--> Planner Agent
--> Risk & Compliance Agent
--> MCP Tool Calls
--> Risk & Compliance Check
--> Response Generation Agent
--> Final Response
+```powershell
+uvicorn app.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-Routes:
+Local URLs:
 
-- General banking query: RAG first, then SearchAPI if RAG confidence is `<= 0.75`.
-- Personalized query: risk check, role-aware DB fetch, masked response.
-- Calculation query: fetch needed context, call the calculator tool, then explain the result.
-- Escalation query: risk check, create escalation, return a safe customer-facing response.
+- UI: http://localhost:8501
+- API: http://localhost:8000
+- API health: http://localhost:8000/health
 
-Escalations are written to `logs/escalations.jsonl`. Branch managers can view branch escalations from the Streamlit sidebar, and risk users can view high-risk notifications. Agent audit logs include route, risk level, tools used, confidence score, and final response.
+## Run with Docker Compose
 
-Branch-manager human-in-the-loop flow:
+Build and start both UI and API:
 
-- Medium-risk cases are created with `status=open` and `target=branch_manager`.
-- A branch manager can open **Show escalations** in the Streamlit sidebar, then approve, reject, or respond with a customer-facing message.
-- The next time the linked customer logs in, the app shows the manager response in a dialog when Streamlit supports dialogs, or as an in-page notification fallback.
-- Once the customer acknowledges the response, the escalation is marked as viewed.
-
-Memory:
-
-- Short-term memory uses the active Streamlit chat history.
-- Long-term memory writes to `data/conversation_memory.jsonl` and, when configured, Supabase `conversation_memory`.
-- Memory is pruned after 60 days of inactivity and can be deleted from the Streamlit sidebar.
-
-### Phase 5 Prompt
-
-The Phase 5 system prompt is now stored in:
-
-- `prompts/phase5/system_prompt.txt`
-
-#### Before Change
-
-This was the original hardcoded prompt inside `app/agents/langgraph_agent.py`:
-
-```text
-You are the Phase 5 banking baseline agent. Choose tools automatically when needed. Use calculator for arithmetic. Use Supabase tools for customer, loan, branch, and transaction data. Use search_api for external rate lookup. Use rag_retrieval for internal banking document context. Respect role boundaries: customer sees only own data, manager sees only branch data, admin/support/risk can view all data, support can update only CustomerName, Address, City, and State, admin can add or delete users. If a tool is not needed, answer directly and briefly.
+```powershell
+docker compose up -d --build
 ```
 
-#### After Change
+View running containers:
 
-This is the current file-based Phase 5 prompt:
-
-```text
-You are the Phase 5 banking baseline agent.
-
-Choose tools automatically when needed.
-Use calculator for arithmetic and amount calculations.
-Use Supabase tools for customer, loan, branch, and transaction data.
-Use search_api for external rate lookup when internal context is weak or unavailable.
-Use rag_retrieval for internal banking document context first.
-
-Respect role boundaries:
-- customer sees only own data
-- manager sees only branch data
-- admin, support, and risk can view all customer data
-- support can update only CustomerName, Address, City, and State
-- admin can add or delete users
-
-When internal RAG results are weak, incomplete, or do not answer the exact user query, prefer search_api as fallback.
-For comparison questions, combine internal RAG context and external search results before answering.
-If a tool is not needed, answer directly and briefly.
-Always produce a customer-friendly final response instead of raw tool output.
+```powershell
+docker compose ps
 ```
 
-### Phase 5 Failures and Corrections
+View logs:
 
-#### 1. Customer and Manager Authorization Path
+```powershell
+docker compose logs -f
+```
 
-Failure:
+Stop containers:
 
-- Protected data requests were sometimes denied before the correct Supabase read path ran.
+```powershell
+docker compose down
+```
 
-Correction:
+## Render Deployment
 
-- Protected customer and manager queries now use direct Supabase calls with the logged-in user JWT so that Supabase RLS can evaluate the real authenticated user.
+The project uses an automated deployment pipeline:
 
-#### 2. Branch Manager Returned Empty Rows
+```text
+GitHub -> GitHub Actions -> Docker image -> Render services
+```
 
-Failure:
+The GitHub workflow builds and publishes the Docker image.
 
-- Branch-manager queries returned empty lists even though data existed.
+Workflow file:
 
-Correction:
+```text
+.github/workflows/docker-publish.yml
+```
 
-- The app now loads `role` and `branch` during login more reliably.
-- Manager reads now rely on Supabase RLS with the manager JWT instead of depending on an extra app-side branch filter.
-- Branch and role matching in Supabase should use trimmed values to avoid whitespace mismatch.
+Deploy two Render web services from the project.
 
-#### 3. RAG Did Not Fall Back to Internet Search
+### API Service
 
-Failure:
+Command:
 
-- Search fallback was triggered only when RAG returned zero matches.
-- Weak but irrelevant RAG matches prevented `search_api` from running.
+```text
+uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
+```
 
-Correction:
+Health check:
 
-- Search fallback now runs when RAG has no matches, when confidence is low, or when the retrieved text does not contain the key query terms.
+```text
+/health
+```
 
-#### 4. Prompt Was Hardcoded
+### UI Service
 
-Failure:
+Command:
 
-- The Phase 5 prompt was embedded directly in the agent code.
+```text
+streamlit run app/ui/streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --server.enableCORS=false --server.enableXsrfProtection=false
+```
 
-Correction:
+Render free instances may sleep after inactivity. The first request after sleep can take longer.
 
-- The prompt is now stored under `prompts/phase5/system_prompt.txt` and loaded through `app/core/prompts.py`.
+## Sample Test Queries
+
+General:
+
+```text
+What is EMI?
+Tell me about home loan repayment options.
+Explain fixed deposits.
+```
+
+Personalized:
+
+```text
+What is my account balance?
+Show my recent transactions.
+What are my personal loan details?
+```
+
+Calculation:
+
+```text
+Calculate EMI for 500000 at 8.5% for 5 years.
+What if I pay extra Rs. 10,000 every month on my personal loan?
+```
+
+Escalation and guardrail:
+
+```text
+My account was hacked.
+Transfer 10000 to this account.
+Can you approve my loan?
+Draft a legal notice to the bank.
+```
+
+## Important Notes
+
+- Authentication is handled through Supabase. Use - /.env_Customer_login
+- RAG retrieval uses Milvus/Zilliz.
+- The assistant is role-aware.
+- The system masks PII before logging.
+- The assistant does not perform real banking transactions.
+- Guardrails are enforced outside the planner so unsafe LLM plans cannot bypass policy.
+- Feedback changes response style only, not access permissions or compliance behavior.

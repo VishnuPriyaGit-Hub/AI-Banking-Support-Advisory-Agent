@@ -6,8 +6,14 @@ from app.core.config import (
     PHASE2_PROMPT_PATH,
     PHASE3_PROMPT_PATH,
     PHASE4_PROMPT_PATH,
+    PHASE4_RAG_ANSWER_PROMPT_PATH,
+    PHASE4_REWRITE_SYSTEM_PROMPT_PATH,
+    PHASE4_REWRITE_PROMPT_PATH,
     PHASE5_PROMPT_PATH,
     PHASE6_CALCULATION_PROMPT_PATH,
+    PHASE6_EVALUATION_PROMPT_PATH,
+    PHASE6_PERSONALIZED_DATA_RESPONSE_PROMPT_PATH,
+    PHASE6_PERSONALIZED_GUIDANCE_PROMPT_PATH,
     PHASE6_PLANNER_PROMPT_PATH,
     PHASE6_RESPONSE_PROMPT_PATH,
     PHASE6_REWRITE_PROMPT_PATH,
@@ -28,6 +34,18 @@ def load_phase3_prompt(prompt_path: Path = PHASE3_PROMPT_PATH) -> str:
 
 
 def load_phase4_prompt(prompt_path: Path = PHASE4_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase4_rewrite_prompt(prompt_path: Path = PHASE4_REWRITE_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase4_rewrite_system_prompt(prompt_path: Path = PHASE4_REWRITE_SYSTEM_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase4_rag_answer_prompt(prompt_path: Path = PHASE4_RAG_ANSWER_PROMPT_PATH) -> str:
     return _read_prompt(prompt_path)
 
 
@@ -53,3 +71,26 @@ def load_phase6_calculation_prompt(prompt_path: Path = PHASE6_CALCULATION_PROMPT
 
 def load_phase6_response_prompt(prompt_path: Path = PHASE6_RESPONSE_PROMPT_PATH) -> str:
     return _read_prompt(prompt_path)
+
+
+def load_phase6_personalized_data_response_prompt(
+    prompt_path: Path = PHASE6_PERSONALIZED_DATA_RESPONSE_PROMPT_PATH,
+) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_personalized_guidance_prompt(
+    prompt_path: Path = PHASE6_PERSONALIZED_GUIDANCE_PROMPT_PATH,
+) -> str:
+    return _read_prompt(prompt_path)
+
+
+def load_phase6_evaluation_prompt(prompt_path: Path = PHASE6_EVALUATION_PROMPT_PATH) -> str:
+    return _read_prompt(prompt_path)
+
+
+def render_prompt(template: str, values: dict[str, object]) -> str:
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace("{{" + key + "}}", str(value))
+    return rendered

@@ -8,7 +8,13 @@ from urllib import error, request
 from pydantic import ValidationError
 
 from app.core.config import DEFAULT_LOG_PATH, get_env_value
-from app.core.prompts import load_phase4_prompt
+from app.core.prompts import (
+    load_phase4_prompt,
+    load_phase4_rag_answer_prompt,
+    load_phase4_rewrite_prompt,
+    load_phase4_rewrite_system_prompt,
+    render_prompt,
+)
 from app.models.agent import AgentRunResult, UserInput
 from app.rag.retrieval import SimpleRAGRetriever
 
@@ -20,6 +26,9 @@ class RAGAgent:
         self.base_url = get_env_value("LLM_BASE_URL") or get_env_value("OPENAI_BASE_URL") or get_env_value("EMBEDDING_BASE_URL")
         self.model = get_env_value("OPENAI_MODEL") or "gpt-4o-mini"
         self.system_prompt = load_phase4_prompt()
+        self.rewrite_system_prompt = load_phase4_rewrite_system_prompt()
+        self.rewrite_prompt = load_phase4_rewrite_prompt()
+        self.rag_answer_prompt = load_phase4_rag_answer_prompt()
 
     def run(self, user_query: UserInput, chat_history: list[dict[str, str]] | None = None) -> AgentRunResult:
         effective_query = self.build_standalone_query(user_query, chat_history)
@@ -58,15 +67,13 @@ class RAGAgent:
         if not history_lines:
             return user_query.query
 
-        system_prompt = (
-            "Given chat history and the latest user question, rewrite the latest question as a standalone query "
-            "for banking document retrieval. Preserve the user's exact intent. "
-            "Return only the rewritten standalone query."
-        )
-        user_prompt = (
-            "Chat history:\n"
-            f"{'\n'.join(history_lines)}\n\n"
-            f"Latest question: {user_query.query}"
+        system_prompt = self.rewrite_system_prompt
+        user_prompt = render_prompt(
+            self.rewrite_prompt,
+            {
+                "CHAT_HISTORY": "\n".join(history_lines),
+                "LATEST_QUESTION": user_query.query,
+            },
         )
         try:
             rewritten = self.call_llm(system_prompt, user_prompt)
@@ -96,12 +103,14 @@ class RAGAgent:
         if not context_blocks:
             return self.build_fallback_answer(user_query, retrieval)
 
-        user_prompt = (
-            f"User role: {user_query.role}\n"
-            f"Original question: {user_query.query}\n"
-            f"Standalone retrieval question: {effective_query}\n\n"
-            "Retrieved context:\n"
-            f"{'\n\n'.join(context_blocks)}"
+        user_prompt = render_prompt(
+            self.rag_answer_prompt,
+            {
+                "USER_ROLE": user_query.role,
+                "ORIGINAL_QUESTION": user_query.query,
+                "STANDALONE_QUESTION": effective_query,
+                "RETRIEVED_CONTEXT": "\n\n".join(context_blocks),
+            },
         )
 
         try:
