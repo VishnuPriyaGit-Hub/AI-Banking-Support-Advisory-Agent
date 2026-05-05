@@ -661,7 +661,28 @@ class MultiAgentBankingAssistant:
                 "close the customer's account",
             ]
         )
-        profile_update_action = any(token in query for token in ["update customer", "change phone", "update phone", "change address", "update address", "change name", "update name", "pincode", "pin code"])
+        profile_update_action = any(
+            token in query
+            for token in [
+                "update customer",
+                "change phone",
+                "update phone",
+                "phone number",
+                "mobile number",
+                "contact number",
+                "change address",
+                "update address",
+                "change name",
+                "update name",
+                "pincode",
+                "pin code",
+                "postal code",
+                "update kyc",
+                "change kyc",
+                "kyc update",
+                "kyc correction",
+            ]
+        )
         if role == "customer" and admin_customer_action:
             return "high", "Customer attempted an unauthorized administrative customer/account action."
         if admin_customer_action or profile_update_action:

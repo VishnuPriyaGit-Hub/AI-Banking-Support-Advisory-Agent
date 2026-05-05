@@ -228,7 +228,27 @@ def _infer_action_type(query: str) -> str:
         ]
     ):
         return "delete_customer_or_account"
-    if any(token in lowered for token in ["change name", "update name", "change phone", "update phone", "phone number", "mobile number", "contact number", "change address", "update address", "pincode", "pin code", "postal code"]):
+    if any(
+        token in lowered
+        for token in [
+            "change name",
+            "update name",
+            "change phone",
+            "update phone",
+            "phone number",
+            "mobile number",
+            "contact number",
+            "change address",
+            "update address",
+            "pincode",
+            "pin code",
+            "postal code",
+            "update kyc",
+            "change kyc",
+            "kyc update",
+            "kyc correction",
+        ]
+    ):
         return "update_contact"
     return "general_review"
 
