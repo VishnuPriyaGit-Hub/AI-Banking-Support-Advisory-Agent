@@ -232,13 +232,20 @@ class MultiAgentBankingAssistant:
             history = state.get("chat_history", [])
             standalone_query = self._rewrite_query(query, history, metadata)
             planning_query = standalone_query or query
-            deterministic_route = self._classify_route(planning_query, history)
+            role = str(metadata.get("role", ""))
+            staff_review_query = self._is_staff_review_query(planning_query, role)
+            fallback_route = "personalized" if staff_review_query else self._classify_route(planning_query, history)
             llm_plan = self._llm_planner_decision(planning_query, history, metadata)
-            route = self._validated_planner_route(deterministic_route, llm_plan.get("route"), planning_query, history)
+            route = self._validated_planner_route(fallback_route, llm_plan.get("route"), planning_query, history)
             plan_type = self._infer_plan_type(planning_query, history, llm_plan)
-            if deterministic_route != "escalation":
+            if route != "escalation":
                 route = self._align_route_with_plan(route, plan_type, llm_plan)
             required_tools = self._select_tools(route, planning_query, plan_type, llm_plan.get("required_tools", []))
+            if staff_review_query and not llm_plan:
+                route = "personalized"
+                plan_type = "data_lookup"
+                required_tools = ["db_tool"]
+                llm_plan["data_scope"] = self._staff_review_data_scope(planning_query)
             data_scope = self._resolve_data_scope(route, metadata.get("role", ""), llm_plan.get("data_scope", "none"), required_tools)
             entities = llm_plan.get("entities", {}) if isinstance(llm_plan.get("entities"), dict) else {}
             calculation_task = llm_plan.get("calculation_task", {}) if isinstance(llm_plan.get("calculation_task"), dict) else {}
@@ -258,7 +265,7 @@ class MultiAgentBankingAssistant:
                 "route": route,
                 "data_scope": data_scope,
                 "tools": required_tools,
-                "planner_mode": "llm_validated" if llm_plan else "deterministic",
+                "planner_mode": "llm_decision" if llm_plan else "deterministic_fallback",
                 "latency_ms": elapsed_ms(start_ms),
             }
             span.update(output={"route": route, "tools": required_tools}, metadata=metadata_out)
@@ -465,15 +472,13 @@ class MultiAgentBankingAssistant:
 
     def _validated_planner_route(
         self,
-        deterministic_route: Route,
+        fallback_route: Route,
         llm_route: Any,
         query: str,
         history: list[dict[str, str]],
     ) -> Route:
-        if deterministic_route == "escalation":
-            return deterministic_route
         if not isinstance(llm_route, str) or llm_route not in {"general", "personalized", "calculation", "escalation"}:
-            return deterministic_route
+            return fallback_route
         return llm_route
 
     def _infer_plan_type(self, query: str, history: list[dict[str, str]], llm_plan: dict[str, Any]) -> str:
@@ -519,7 +524,7 @@ class MultiAgentBankingAssistant:
             return "none"
         customer_scopes = {"customer_snapshot", "customer_loans", "customer_transactions"}
         manager_scopes = {"branch_customers", "branch_loan_customers"}
-        staff_scopes = {"customer_snapshot", "all_customers"}
+        staff_scopes = {"customer_snapshot", "customer_transactions", "all_customers"}
         if role == "customer":
             return scope if scope in customer_scopes else "customer_snapshot"
         if role == "manager":
@@ -527,6 +532,32 @@ class MultiAgentBankingAssistant:
         if role in {"admin", "support", "risk"}:
             return scope if scope in staff_scopes else "all_customers"
         return "none"
+
+    def _is_staff_review_query(self, query: str, role: str) -> bool:
+        if role not in {"admin", "support", "risk"}:
+            return False
+        q = query.lower()
+        has_customer_ref = bool(self._extract_customer_id(query))
+        review_terms = [
+            "details",
+            "look into",
+            "show",
+            "inspect",
+            "review",
+            "transaction",
+            "transactions",
+            "suspicious",
+            "case",
+            "account",
+            "customer",
+        ]
+        return has_customer_ref and any(term in q for term in review_terms)
+
+    def _staff_review_data_scope(self, query: str) -> str:
+        q = query.lower()
+        if any(term in q for term in ["transaction", "transactions", "suspicious", "debit", "credit"]):
+            return "customer_transactions"
+        return "customer_snapshot"
 
     def _route_tool_floor(self, route: Route) -> list[str]:
         return {
@@ -612,7 +643,24 @@ class MultiAgentBankingAssistant:
         metadata = state.get("user_metadata", {})
         role = metadata.get("role", "")
         route = state.get("route", "general")
-        admin_customer_action = any(token in query for token in ["add customer", "create customer", "new customer", "delete customer", "remove customer", "delete account", "close account"])
+        if self._is_staff_review_query(state.get("standalone_query") or state["user_query"], role):
+            return "low", "Authorized staff review of customer or risk details."
+        admin_customer_action = any(
+            token in query
+            for token in [
+                "add customer",
+                "create customer",
+                "new customer",
+                "delete customer",
+                "remove customer",
+                "delete account",
+                "close account",
+                "close customer",
+                "close the customer",
+                "close customer's account",
+                "close the customer's account",
+            ]
+        )
         profile_update_action = any(token in query for token in ["update customer", "change phone", "update phone", "change address", "update address", "change name", "update name", "pincode", "pin code"])
         if role == "customer" and admin_customer_action:
             return "high", "Customer attempted an unauthorized administrative customer/account action."
@@ -680,7 +728,9 @@ class MultiAgentBankingAssistant:
                         result = json.dumps(client.get_branch_customers(metadata.get("branch", "")), indent=2)
                 elif role in {"admin", "support", "risk"}:
                     requested_customer_id = self._target_customer_id(state)
-                    if data_scope == "customer_snapshot" and requested_customer_id:
+                    if data_scope == "customer_transactions" and requested_customer_id:
+                        result = json.dumps(client.get_customer_transactions(requested_customer_id), indent=2)
+                    elif data_scope == "customer_snapshot" and requested_customer_id:
                         result = json.dumps(client.get_customer_snapshot(requested_customer_id), indent=2)
                     else:
                         result = json.dumps(client.get_all_customers(), indent=2)
@@ -1496,7 +1546,7 @@ class MultiAgentBankingAssistant:
         return max(matches, key=len).strip() if matches else ""
 
     def _extract_customer_id(self, text: str) -> str:
-        match = re.search(r"\bC\d{3,}\b", text, flags=re.IGNORECASE)
+        match = re.search(r"\b(?:CUST\d+|C\d{3,})\b", text, flags=re.IGNORECASE)
         return match.group(0).upper() if match else ""
 
     def _add_step_log(self, state: BankingState, step: str, **payload: Any) -> None:

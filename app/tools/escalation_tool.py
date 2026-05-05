@@ -214,7 +214,19 @@ def _infer_action_type(query: str) -> str:
         return "fraud_or_security_review"
     if any(token in lowered for token in ["add customer", "create customer", "new customer", "add account", "create account", "open account"]):
         return "add_customer_or_account"
-    if any(token in lowered for token in ["delete customer", "remove customer", "delete account", "close account"]):
+    if any(
+        token in lowered
+        for token in [
+            "delete customer",
+            "remove customer",
+            "delete account",
+            "close account",
+            "close customer",
+            "close the customer",
+            "close customer's account",
+            "close the customer's account",
+        ]
+    ):
         return "delete_customer_or_account"
     if any(token in lowered for token in ["change name", "update name", "change phone", "update phone", "phone number", "mobile number", "contact number", "change address", "update address", "pincode", "pin code", "postal code"]):
         return "update_contact"
