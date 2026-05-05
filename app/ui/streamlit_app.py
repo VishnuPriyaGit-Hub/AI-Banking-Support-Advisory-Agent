@@ -766,6 +766,13 @@ def render_chat() -> None:
             branch = profile.get("branch", "")
             memory_user_id = profile.get("id") or customer_id or st.session_state.user_name or normalized_role
             behavior_preferences = ConversationMemory(user_jwt=profile.get("access_token", "")).behavior_preferences(str(memory_user_id))
+            previous_chat_history = st.session_state.chat_history
+            if (
+                previous_chat_history
+                and previous_chat_history[-1].get("speaker") == "user"
+                and previous_chat_history[-1].get("text") == pending_message
+            ):
+                previous_chat_history = previous_chat_history[:-1]
             with st.spinner("Processing your request..."):
                 result = st.session_state.agent.run(
                     pending_message,
@@ -774,7 +781,7 @@ def render_chat() -> None:
                     branch=branch,
                     auth_user_id=profile.get("id", ""),
                     user_jwt=profile.get("access_token", ""),
-                    chat_history=st.session_state.chat_history,
+                    chat_history=previous_chat_history,
                     behavior_preferences=behavior_preferences,
                 )
 

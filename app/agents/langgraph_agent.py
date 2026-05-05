@@ -230,14 +230,15 @@ class MultiAgentBankingAssistant:
         metadata = state.get("user_metadata", {})
         with start_span("planner_agent", input_payload={"query": redact_text(query)}, metadata={"trace_id": state.get("trace_id", "")}) as span:
             history = state.get("chat_history", [])
-            deterministic_route = self._classify_route(query, history)
-            llm_plan = self._llm_planner_decision(query, history, metadata)
-            route = self._validated_planner_route(deterministic_route, llm_plan.get("route"), query, history)
-            plan_type = self._infer_plan_type(query, history, llm_plan)
+            standalone_query = self._rewrite_query(query, history, metadata)
+            planning_query = standalone_query or query
+            deterministic_route = self._classify_route(planning_query, history)
+            llm_plan = self._llm_planner_decision(planning_query, history, metadata)
+            route = self._validated_planner_route(deterministic_route, llm_plan.get("route"), planning_query, history)
+            plan_type = self._infer_plan_type(planning_query, history, llm_plan)
             if deterministic_route != "escalation":
                 route = self._align_route_with_plan(route, plan_type, llm_plan)
-            standalone_query = self._rewrite_query(query, state.get("chat_history", []), metadata)
-            required_tools = self._select_tools(route, query, plan_type, llm_plan.get("required_tools", []))
+            required_tools = self._select_tools(route, planning_query, plan_type, llm_plan.get("required_tools", []))
             data_scope = self._resolve_data_scope(route, metadata.get("role", ""), llm_plan.get("data_scope", "none"), required_tools)
             entities = llm_plan.get("entities", {}) if isinstance(llm_plan.get("entities"), dict) else {}
             calculation_task = llm_plan.get("calculation_task", {}) if isinstance(llm_plan.get("calculation_task"), dict) else {}
@@ -719,10 +720,10 @@ class MultiAgentBankingAssistant:
                 value = str(entities.get(key, "")).strip()
                 if value:
                     return value
-        return self._extract_customer_id(state.get("user_query", ""))
+        return self._extract_customer_id(state.get("standalone_query") or state.get("user_query", ""))
 
     def _build_calculation_payload(self, state: BankingState, context: dict[str, str]) -> str:
-        query = state["user_query"]
+        query = state.get("standalone_query") or state["user_query"]
         task_payload = self._build_payload_from_calculation_task(state)
         if task_payload and "db_tool" not in context:
             return task_payload
@@ -788,11 +789,12 @@ class MultiAgentBankingAssistant:
         task = state.get("calculation_task", {})
         inputs = task.get("inputs", {}) if isinstance(task, dict) and isinstance(task.get("inputs"), dict) else {}
         amount = self._input_number(inputs, "extra_monthly_payment", "additional_monthly_payment", "prepayment_amount")
+        query = state.get("standalone_query") or state.get("user_query", "")
         if amount is None:
-            amount = self._extract_first_amount(state.get("user_query", ""))
+            amount = self._extract_first_amount(query)
         if not loans or amount is None:
             return ""
-        loan = self._select_relevant_loan(state.get("user_query", ""), loans, state.get("entities", {}))
+        loan = self._select_relevant_loan(query, loans, state.get("entities", {}))
         if not loan:
             return ""
         outstanding = self._number_from_record(loan, "outstandingbalance", "outstanding_balance")
@@ -903,13 +905,23 @@ class MultiAgentBankingAssistant:
             return self._build_db_response(state)
         if not self.llm:
             return self._fallback_response(state)
+        safe_history = [
+            {
+                "speaker": item.get("speaker", "user"),
+                "text": redact_text(str(item.get("text", ""))),
+            }
+            for item in state.get("chat_history", [])[-6:]
+        ]
         prompt = (
             f"{self.system_prompt}\n\n"
             f"{self.response_prompt}\n\n"
             f"Route: {state.get('route')}\nRisk level: {state.get('risk_level')}\n"
             f"User role: {state.get('user_metadata', {}).get('role', '')}\n"
             f"Safe behavior preferences from prior feedback: {redact_text(str(state.get('behavior_preferences', '')))}\n"
-            f"User query: {redact_text(state.get('user_query', ''))}\nConfidence score: {state.get('confidence_score')}\n"
+            f"Recent chat history: {json.dumps(safe_history)}\n"
+            f"Original user query: {redact_text(state.get('user_query', ''))}\n"
+            f"Standalone context-aware query: {redact_text(state.get('standalone_query', '') or state.get('user_query', ''))}\n"
+            f"Confidence score: {state.get('confidence_score')}\n"
             f"Tool outputs:\n{json.dumps(self._redact_tool_context_for_llm(state.get('tool_outputs', {})), indent=2)[:9000]}"
         )
         try:
@@ -1031,7 +1043,7 @@ class MultiAgentBankingAssistant:
                 "RESPONSE_PROMPT": self.response_prompt,
                 "ROLE_INSTRUCTION": role_instruction,
                 "USER_ROLE": role,
-                "USER_QUERY": redact_text(state.get("user_query", "")),
+                "USER_QUERY": redact_text(state.get("standalone_query") or state.get("user_query", "")),
                 "BEHAVIOR_PREFERENCES": redact_text(str(state.get("behavior_preferences", ""))),
                 "SANITIZED_CONTEXT": json.dumps(safe_context, indent=2)[:7000],
             },
@@ -1256,7 +1268,7 @@ class MultiAgentBankingAssistant:
         if not self._db_tool_succeeded(raw_output):
             return "I could not fetch the database details right now. Please check the database connection and try again."
 
-        query = state.get("user_query", "").lower()
+        query = (state.get("standalone_query") or state.get("user_query", "")).lower()
         try:
             payload = json.loads(raw_output)
         except json.JSONDecodeError:
@@ -1354,7 +1366,7 @@ class MultiAgentBankingAssistant:
 
     def _build_guidance_query(self, state: BankingState, db_output: str) -> str:
         loan_types = self._extract_safe_loan_types(db_output)
-        query = redact_text(state.get("user_query", ""))
+        query = redact_text(state.get("standalone_query") or state.get("user_query", ""))
         standalone = redact_text(state.get("standalone_query", "") or query)
         if loan_types:
             return f"{standalone}\nRelevant loan types: {', '.join(loan_types)}"
@@ -1378,7 +1390,7 @@ class MultiAgentBankingAssistant:
                 self.personalized_guidance_prompt,
                 {
                     "RESPONSE_PROMPT": self.response_prompt,
-                    "USER_QUERY": redact_text(state.get("user_query", "")),
+                    "USER_QUERY": redact_text(state.get("standalone_query") or state.get("user_query", "")),
                     "BEHAVIOR_PREFERENCES": redact_text(str(state.get("behavior_preferences", ""))),
                     "LOAN_CONTEXT": loan_context,
                     "POLICY_CONTEXT": json.dumps(self._redact_tool_context_for_llm(policy_context), indent=2)[:7000],
@@ -1552,6 +1564,7 @@ class MultiAgentBankingAssistant:
             "trace_id": state.get("trace_id", ""),
             "started_at": state.get("started_at", ""),
             "total_latency_ms": state.get("total_latency_ms", 0),
+            "standalone_query": redact_text(str(state.get("standalone_query", ""))),
             "final_response": self._storage_safe_response(state),
             "logs": redact_value(state.get("logs", [])),
         }
@@ -1574,6 +1587,7 @@ class MultiAgentBankingAssistant:
             "evaluation_metrics": state.get("evaluation_metrics", {}),
             "evaluation_reason": redact_text(str(state.get("evaluation_reason", ""))),
             "query": redact_text(str(state.get("user_query", ""))),
+            "standalone_query": redact_text(str(state.get("standalone_query", ""))),
             "final_response": self._storage_safe_response(state),
             "total_latency_ms": state.get("total_latency_ms", 0),
             "data_scope": state.get("data_scope", ""),
