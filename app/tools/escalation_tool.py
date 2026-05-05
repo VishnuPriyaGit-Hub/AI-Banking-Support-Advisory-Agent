@@ -16,8 +16,8 @@ def create_escalation_tool(payload_json: str) -> str:
     payload = json.loads(payload_json)
     risk_level = str(payload.get("risk_level", "")).lower()
     customer_id = str(payload.get("customer_id", ""))
-    action_type = _infer_action_type(str(payload.get("query", "")))
-    action_target = _infer_action_target(action_type)
+    action_type = _validated_action_type(str(payload.get("action_type", ""))) or _infer_action_type(str(payload.get("query", "")))
+    action_target = _validated_action_target(str(payload.get("action_target", ""))) or _infer_action_target(action_type)
     role = str(payload.get("role", "")).lower()
     target = _infer_initial_target(risk_level)
     record = {
@@ -277,6 +277,16 @@ def _infer_action_type(query: str) -> str:
     ):
         return "update_contact"
     return "general_review"
+
+
+def _validated_action_type(action_type: str) -> str:
+    action_type = action_type.strip().lower()
+    return action_type if action_type in {"general_review", "add_customer_or_account", "delete_customer_or_account", "update_contact", "fraud_or_security_review"} else ""
+
+
+def _validated_action_target(action_target: str) -> str:
+    action_target = action_target.strip().lower()
+    return action_target if action_target in {"branch_manager", "admin", "support", "risk_team"} else ""
 
 
 def _infer_action_target(action_type: str) -> str:

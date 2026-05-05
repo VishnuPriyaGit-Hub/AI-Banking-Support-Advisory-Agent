@@ -459,6 +459,19 @@ class MultiAgentBankingAssistant:
         calculation_task = payload.get("calculation_task", {})
         if not isinstance(calculation_task, dict):
             calculation_task = {}
+        escalation_action_type = str(payload.get("escalation_action_type", "general_review")).strip().lower()
+        allowed_action_types = {
+            "general_review",
+            "add_customer_or_account",
+            "delete_customer_or_account",
+            "update_contact",
+            "fraud_or_security_review",
+        }
+        if escalation_action_type not in allowed_action_types:
+            escalation_action_type = "general_review"
+        escalation_action_target = str(payload.get("escalation_action_target", "branch_manager")).strip().lower()
+        if escalation_action_target not in {"branch_manager", "admin", "support", "risk_team"}:
+            escalation_action_target = "branch_manager"
         return {
             "route": route,
             "plan_type": plan_type,
@@ -466,6 +479,8 @@ class MultiAgentBankingAssistant:
             "data_scope": data_scope,
             "entities": redact_mapping(entities),
             "calculation_task": redact_value(calculation_task),
+            "escalation_action_type": escalation_action_type,
+            "escalation_action_target": escalation_action_target,
             "reason": redact_text(str(payload.get("reason", ""))),
             "confidence": confidence_value,
         }
@@ -643,6 +658,9 @@ class MultiAgentBankingAssistant:
         metadata = state.get("user_metadata", {})
         role = metadata.get("role", "")
         route = state.get("route", "general")
+        planner_escalation_risk = self._planner_escalation_risk(state)
+        if planner_escalation_risk:
+            return planner_escalation_risk
         admin_customer_action = any(
             token in query
             for token in [
@@ -723,6 +741,20 @@ class MultiAgentBankingAssistant:
         if any(token in query for token in ["complaint", "dispute", "chargeback", "failed transaction", "deducted but"]) or contains_ambiguous_action_request(query):
             return "medium", "Ambiguous or support-sensitive request requires human review."
         return "low", "Allowed request within role and policy boundaries."
+
+    def _planner_escalation_risk(self, state: BankingState) -> tuple[RiskLevel, str] | None:
+        if state.get("route") != "escalation":
+            return None
+        planner_plan = state.get("planner_plan", {})
+        if not isinstance(planner_plan, dict):
+            return None
+        action_type = str(planner_plan.get("escalation_action_type", "")).lower()
+        action_target = str(planner_plan.get("escalation_action_target", "")).lower()
+        if action_type == "fraud_or_security_review" or action_target == "risk_team":
+            return "high", "Planner identified a fraud or security escalation."
+        if action_target in {"admin", "support", "branch_manager"}:
+            return "medium", "Planner identified a request that requires branch manager approval or human review."
+        return None
 
     def _rewrite_query(self, query: str, history: list[dict[str, str]], metadata: dict[str, Any]) -> str:
         if not self.llm or not history:
@@ -1078,12 +1110,17 @@ class MultiAgentBankingAssistant:
     def _escalation_response(self, state: BankingState) -> str:
         raw_output = str(state.get("tool_outputs", {}).get("create_escalation", ""))
         target = state.get("escalated_to") or self._escalation_target_from_output(raw_output)
+        action_target = self._escalation_action_target_from_output(raw_output)
         if target == "admin":
             return "I have routed this account/customer administration request to Admin for verification and action. It will not be executed until the required checks are completed."
         if target == "support":
             return "I have routed this customer profile update request to Support for verification and action after approval checks."
         if target == "risk_team":
             return "This request has been sent to the risk team for review."
+        if action_target == "admin":
+            return "I have sent this account/customer administration request to your branch manager for approval. If approved, it will move to Admin for action."
+        if action_target == "support":
+            return "I have sent this profile update request to your branch manager for approval. If approved, it will move to Support for action."
         return "I have escalated this request to your branch manager. They will review it and follow up with you."
 
     def _escalation_target_from_output(self, raw_output: str) -> str:
@@ -1092,6 +1129,14 @@ class MultiAgentBankingAssistant:
         except (TypeError, json.JSONDecodeError):
             return ""
         target = str(payload.get("target", ""))
+        return target if target in {"branch_manager", "admin", "support", "risk_team"} else ""
+
+    def _escalation_action_target_from_output(self, raw_output: str) -> str:
+        try:
+            payload = json.loads(raw_output)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        target = str(payload.get("action_target", ""))
         return target if target in {"branch_manager", "admin", "support", "risk_team"} else ""
 
     def _low_confidence_response(self, state: BankingState) -> str:
@@ -1563,6 +1608,7 @@ class MultiAgentBankingAssistant:
 
     def _create_escalation(self, state: BankingState) -> str:
         metadata = state.get("user_metadata", {})
+        planner_plan = state.get("planner_plan", {})
         payload = {
             "risk_level": state.get("risk_level", "medium"),
             "route": state.get("route", "escalation"),
@@ -1572,6 +1618,9 @@ class MultiAgentBankingAssistant:
             "query": redact_text(state.get("user_query", "")),
             "reason": redact_text(state.get("risk_reason", "")),
         }
+        if isinstance(planner_plan, dict):
+            payload["action_type"] = planner_plan.get("escalation_action_type", "")
+            payload["action_target"] = planner_plan.get("escalation_action_target", "")
         return self._safe_tool_call("create_escalation", json.dumps(payload), state=state)
 
     def _extract_confidence(self, raw: str) -> float:

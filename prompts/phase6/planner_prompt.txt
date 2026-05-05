@@ -20,6 +20,8 @@ Required JSON schema:
     "operation": "none | emi | simple_interest | eligibility | balance_summary | repayment_impact",
     "inputs": {}
   },
+  "escalation_action_type": "general_review | add_customer_or_account | delete_customer_or_account | update_contact | fraud_or_security_review",
+  "escalation_action_target": "branch_manager | admin | support | risk_team",
   "reason": "short non-sensitive planning reason",
   "confidence": 0.0
 }
@@ -39,6 +41,13 @@ Planning rules:
 - Use calculation_task to describe the intended calculation and numeric inputs available from the query. For customer-specific repayment impact, use operation "repayment_impact" and include inputs such as {"extra_monthly_payment": 10000}.
 - Use "escalation" for money movement, approvals, account/card blocking, legal advice, OTP/PIN/CVV/password requests, complaints, disputes, customer/account maintenance, ambiguous action requests, or anything that needs human approval.
 - For fraud/security language, distinguish review from action: customer-reported fraud or account compromise should be escalation; staff investigation of a specific customer/case should be personalized; staff requests to close/delete/block/update/approve should be escalation.
+- For every escalation route, set escalation_action_type and escalation_action_target:
+  - add/create/open customer or customer account -> add_customer_or_account, admin
+  - delete/remove/close customer or customer account -> delete_customer_or_account, admin
+  - phone/mobile/contact/address/name/pincode/KYC update or correction -> update_contact, support
+  - fraud/hacked/phishing/unauthorized access/security compromise -> fraud_or_security_review, risk_team
+  - complaint/dispute/chargeback/ambiguous support review -> general_review, branch_manager
+- Medium-risk admin/support actions must first be sent to the branch manager for approval in runtime, but escalation_action_target must still be admin or support so the approved request moves to the right team.
 - Never route money movement, approvals, destructive changes, credential access, legal advice, or ambiguous banking actions as general, personalized, or calculation.
 - Do not request or reveal PII. The query and history may already be redacted.
 - Do not bypass compliance. Code guardrails will validate your route.
