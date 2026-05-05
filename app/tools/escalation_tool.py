@@ -15,10 +15,11 @@ ESCALATION_PATH = LOG_DIR / "escalations.jsonl"
 def create_escalation_tool(payload_json: str) -> str:
     payload = json.loads(payload_json)
     risk_level = str(payload.get("risk_level", "")).lower()
-    target = "risk_team" if risk_level == "high" else "branch_manager"
     customer_id = str(payload.get("customer_id", ""))
     action_type = _infer_action_type(str(payload.get("query", "")))
     action_target = _infer_action_target(action_type)
+    role = str(payload.get("role", "")).lower()
+    target = _infer_initial_target(risk_level)
     record = {
         "id": f"ESC-{uuid4().hex[:12]}",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -32,7 +33,7 @@ def create_escalation_tool(payload_json: str) -> str:
         "customer_ref": hash_identifier(customer_id),
         "customer_display": mask_identifier(customer_id),
         "branch": payload.get("branch", ""),
-        "role": payload.get("role", ""),
+        "role": role,
         "query": redact_text(str(payload.get("query", ""))),
         "reason": redact_text(str(payload.get("reason", ""))),
         "manager_response": "",
@@ -42,7 +43,16 @@ def create_escalation_tool(payload_json: str) -> str:
     ESCALATION_PATH.parent.mkdir(parents=True, exist_ok=True)
     with ESCALATION_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
-    return json.dumps({"status": "notified", "id": record["id"], "target": target, "risk_level": record["risk_level"]})
+    return json.dumps(
+        {
+            "status": "notified",
+            "id": record["id"],
+            "target": target,
+            "risk_level": record["risk_level"],
+            "action_type": action_type,
+            "action_target": action_target,
+        }
+    )
 
 
 def list_escalations_tool(filter_json: str = "") -> str:
@@ -158,8 +168,10 @@ def _read_escalations() -> list[dict[str, object]]:
             row["customer_display"] = mask_identifier(raw_customer_id)
             row.pop("customer_id", None)
         row.setdefault("status", "open")
-        row.setdefault("action_type", _infer_action_type(str(row.get("query", ""))))
-        row.setdefault("action_target", _infer_action_target(str(row.get("action_type", "general_review"))))
+        inferred_action_type = _infer_action_type(str(row.get("query", "")))
+        if not row.get("action_type") or (row.get("action_type") == "general_review" and inferred_action_type != "general_review"):
+            row["action_type"] = inferred_action_type
+        row["action_target"] = _infer_action_target(str(row.get("action_type", "general_review")))
         row.setdefault("manager_response", "")
         row.setdefault("manager_user", "")
         row.setdefault("operation_response", "")
@@ -198,6 +210,8 @@ def _matches_filters(row: dict[str, object], filters: dict[str, object]) -> bool
 
 def _infer_action_type(query: str) -> str:
     lowered = query.lower()
+    if any(token in lowered for token in ["hacked", "fraud", "unauthorized", "stolen", "phishing", "otp"]):
+        return "fraud_or_security_review"
     if any(token in lowered for token in ["add customer", "create customer", "new customer", "add account", "create account", "open account"]):
         return "add_customer_or_account"
     if any(token in lowered for token in ["delete customer", "remove customer", "delete account", "close account"]):
@@ -208,8 +222,16 @@ def _infer_action_type(query: str) -> str:
 
 
 def _infer_action_target(action_type: str) -> str:
+    if action_type == "fraud_or_security_review":
+        return "risk_team"
     if action_type in {"add_customer_or_account", "delete_customer_or_account"}:
         return "admin"
     if action_type == "update_contact":
         return "support"
+    return "branch_manager"
+
+
+def _infer_initial_target(risk_level: str) -> str:
+    if risk_level == "high":
+        return "risk_team"
     return "branch_manager"

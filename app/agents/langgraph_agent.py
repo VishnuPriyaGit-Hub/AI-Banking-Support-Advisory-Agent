@@ -327,6 +327,7 @@ class MultiAgentBankingAssistant:
                 outputs["calculator"] = self._safe_tool_call("calculator", self._build_calculation_payload(state, context), state=state)
             elif route == "escalation":
                 outputs["create_escalation"] = self._create_escalation(state)
+                state["escalated_to"] = self._escalation_target_from_output(outputs["create_escalation"]) or state.get("escalated_to", "")
             state["tool_outputs"] = outputs
             span.update(
                 output={"tools_used": list(outputs.keys())},
@@ -339,8 +340,10 @@ class MultiAgentBankingAssistant:
         with start_span("response_generation", metadata={"trace_id": state.get("trace_id", ""), "route": state.get("route", "")}) as span:
             if state.get("blocked"):
                 response = self._blocked_response(state)
+            elif state.get("route") == "escalation" and "create_escalation" in state.get("tool_outputs", {}):
+                response = self._escalation_response(state)
             elif state.get("risk_level") == "medium":
-                response = "I have escalated this request to your branch manager. They will review it and follow up with you."
+                response = self._escalation_response(state)
             else:
                 response = self._generate_response(state)
             state["final_response"] = response
@@ -608,8 +611,12 @@ class MultiAgentBankingAssistant:
         metadata = state.get("user_metadata", {})
         role = metadata.get("role", "")
         route = state.get("route", "general")
-        if any(token in query for token in ["add customer", "create customer", "new customer", "delete customer", "remove customer", "update customer", "change phone", "update phone", "change address", "update address", "change name", "update name", "pincode", "pin code"]):
-            return "medium", "Customer/account maintenance request requires branch manager approval before staff action."
+        admin_customer_action = any(token in query for token in ["add customer", "create customer", "new customer", "delete customer", "remove customer", "delete account", "close account"])
+        profile_update_action = any(token in query for token in ["update customer", "change phone", "update phone", "change address", "update address", "change name", "update name", "pincode", "pin code"])
+        if role == "customer" and admin_customer_action:
+            return "high", "Customer attempted an unauthorized administrative customer/account action."
+        if admin_customer_action or profile_update_action:
+            return "medium", "Customer/account maintenance request requires authorized staff review before action."
         if redact_text(query) != query:
             return "high", "Request contains sensitive personal or financial identifiers."
         if any(token in query for token in ["transfer", "send money", "withdraw", "approve loan", "share otp"]):
@@ -962,7 +969,28 @@ class MultiAgentBankingAssistant:
             return "I cannot provide legal advice. I can share general banking process information, or escalate this for human review if you need help with a bank service issue."
         if "credentials" in reason or "personal identifiers" in reason:
             return "This request involves sensitive personal or credential information, so I cannot provide it. I have notified the risk team for review."
+        if "fraud" in reason or "account compromise" in reason:
+            return "This action is restricted and cannot be performed here. I have notified the risk team for review."
         return "This action is restricted and cannot be performed. I have notified the risk team for review."
+
+    def _escalation_response(self, state: BankingState) -> str:
+        raw_output = str(state.get("tool_outputs", {}).get("create_escalation", ""))
+        target = state.get("escalated_to") or self._escalation_target_from_output(raw_output)
+        if target == "admin":
+            return "I have routed this account/customer administration request to Admin for verification and action. It will not be executed until the required checks are completed."
+        if target == "support":
+            return "I have routed this customer profile update request to Support for verification and action after approval checks."
+        if target == "risk_team":
+            return "This request has been sent to the risk team for review."
+        return "I have escalated this request to your branch manager. They will review it and follow up with you."
+
+    def _escalation_target_from_output(self, raw_output: str) -> str:
+        try:
+            payload = json.loads(raw_output)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        target = str(payload.get("target", ""))
+        return target if target in {"branch_manager", "admin", "support", "risk_team"} else ""
 
     def _low_confidence_response(self, state: BankingState) -> str:
         role = str(state.get("user_metadata", {}).get("role", "customer"))

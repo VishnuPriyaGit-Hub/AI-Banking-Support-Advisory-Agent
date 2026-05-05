@@ -175,12 +175,13 @@ def render_sidebar() -> None:
                 )
 
         st.divider()
-        if st.session_state.role in {"manager", "branch_manager", "risk", "risk_compliance_officer", "admin", "support", "customer_support_agent"}:
+        role = normalized_session_role()
+        if role in {"manager", "risk", "admin", "support"}:
             st.session_state.show_escalations = st.toggle(
                 "Show escalations",
                 value=st.session_state.show_escalations,
             )
-        if normalized_session_role() == "support":
+        if role == "support":
             st.session_state.show_support_dashboard = st.toggle(
                 "Support dashboard",
                 value=st.session_state.show_support_dashboard,
@@ -199,15 +200,15 @@ def render_sidebar() -> None:
 
 def render_escalations() -> None:
     profile = st.session_state.user_profile
-    role = str(st.session_state.role).lower()
+    role = normalized_session_role()
     filters = {}
-    if role in {"manager", "branch_manager"} and profile.get("branch"):
+    if role == "manager" and profile.get("branch"):
         filters = {"branch": profile.get("branch"), "target": "branch_manager"}
-    elif role in {"risk", "risk_compliance_officer"}:
+    elif role == "risk":
         filters = {"target": "risk_team"}
     elif role == "admin":
         filters = {"target": "admin"}
-    elif role in {"support", "customer_support_agent"}:
+    elif role == "support":
         filters = {"target": "support"}
 
     raw = LocalMCPClient().call_tool("list_escalations", json.dumps(filters))
@@ -233,12 +234,12 @@ def render_escalations() -> None:
                 st.caption(f"Completed by: {item.get('completed_by', '')}")
             elif item.get("target") == "admin" and role == "admin" and item.get("status") == "approved_pending_action":
                 render_admin_operation_form(item)
-            elif item.get("target") == "support" and role in {"support", "customer_support_agent"} and item.get("status") == "approved_pending_action":
+            elif item.get("target") == "support" and role == "support" and item.get("status") == "approved_pending_action":
                 render_support_operation_form(item)
             elif item.get("manager_response"):
                 st.info(str(item.get("manager_response", "")))
                 st.caption(f"Decision by: {item.get('manager_user', '')}")
-            elif item.get("target") == "branch_manager" and role in {"manager", "branch_manager", "admin"}:
+            elif item.get("target") == "branch_manager" and role in {"manager", "admin"}:
                 render_manager_decision_form(item)
 
 
@@ -597,7 +598,7 @@ def load_customer_manager_responses() -> None:
         return
     st.session_state.manager_response_checked = True
     profile = st.session_state.user_profile
-    role = str(st.session_state.role).lower()
+    role = normalized_session_role()
     customer_id = profile_customer_id(profile)
     if role != "customer" or not customer_id:
         st.session_state.pending_manager_responses = []
