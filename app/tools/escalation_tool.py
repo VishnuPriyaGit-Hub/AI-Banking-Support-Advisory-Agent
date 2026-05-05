@@ -212,16 +212,42 @@ def _infer_action_type(query: str) -> str:
     lowered = query.lower()
     if any(token in lowered for token in ["hacked", "fraud", "unauthorized", "stolen", "phishing", "otp"]):
         return "fraud_or_security_review"
-    if any(token in lowered for token in ["add customer", "create customer", "new customer", "add account", "create account", "open account"]):
+    if any(
+        token in lowered
+        for token in [
+            "add customer",
+            "add a customer",
+            "addition customer",
+            "addition of customer",
+            "create customer",
+            "new customer",
+            "add account",
+            "add an account",
+            "add customer account",
+            "add a customer account",
+            "create account",
+            "create customer account",
+            "open account",
+            "open customer account",
+            "open a customer account",
+        ]
+    ):
         return "add_customer_or_account"
     if any(
         token in lowered
         for token in [
             "delete customer",
+            "delete a customer",
+            "delete customer account",
+            "delete a customer account",
             "remove customer",
+            "remove a customer",
+            "remove customer account",
+            "remove a customer account",
             "delete account",
             "close account",
             "close customer",
+            "close customer account",
             "close the customer",
             "close customer's account",
             "close the customer's account",

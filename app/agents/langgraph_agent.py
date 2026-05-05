@@ -639,28 +639,47 @@ class MultiAgentBankingAssistant:
         return selected
 
     def _classify_risk(self, state: BankingState) -> tuple[RiskLevel, str]:
-        query = state["user_query"].lower()
+        query = (state.get("standalone_query") or state["user_query"]).lower()
         metadata = state.get("user_metadata", {})
         role = metadata.get("role", "")
         route = state.get("route", "general")
-        if self._is_staff_review_query(state.get("standalone_query") or state["user_query"], role):
-            return "low", "Authorized staff review of customer or risk details."
         admin_customer_action = any(
             token in query
             for token in [
                 "add customer",
+                "add a customer",
+                "addition customer",
+                "addition of customer",
                 "create customer",
                 "new customer",
+                "add account",
+                "add an account",
+                "add customer account",
+                "add a customer account",
+                "create account",
+                "create customer account",
+                "open account",
+                "open customer account",
+                "open a customer account",
                 "delete customer",
+                "delete a customer",
+                "delete customer account",
+                "delete a customer account",
                 "remove customer",
+                "remove a customer",
+                "remove customer account",
+                "remove a customer account",
                 "delete account",
                 "close account",
                 "close customer",
+                "close customer account",
                 "close the customer",
                 "close customer's account",
                 "close the customer's account",
             ]
         )
+        if self._is_staff_review_query(state.get("standalone_query") or state["user_query"], role) and not admin_customer_action:
+            return "low", "Authorized staff review of customer or risk details."
         profile_update_action = any(
             token in query
             for token in [
